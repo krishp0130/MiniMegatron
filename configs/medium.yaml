@@ -1,0 +1,11 @@
+# medium: 124,475,904 params. GPT-2 small's architecture with the vocab padded 50257 -> 50304.
+model:
+  vocab_size: 50304
+  seq_len: 1024
+  n_layers: 12
+  n_heads: 12              # head_dim = 64
+  d_model: 768
+  d_ff: 3072
+  dropout: 0.0
+  attention_backend: reference
+  norm_type: layernorm

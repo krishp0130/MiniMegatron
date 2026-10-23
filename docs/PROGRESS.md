@@ -6,15 +6,16 @@ checklist items, add a session-log entry, and rewrite "Next up". Scope lives in
 
 ## Current state
 
-- **Active milestone:** 1 (Functional GPT baseline), not yet started
+- **Active milestone:** 1 (Functional GPT baseline), step 1 of 6 done
 - **Last updated:** 2026-10-23
-- **Test status:** no tests yet (`pytest` collects 0)
+- **Test status:** 31 passed (`pytest tests/unit -q`, CPU)
 - **Verified hardware:** Apple M4 Pro (CPU + MPS). No NVIDIA GPU verification yet.
 
 ## Next up
 
-Milestone 1, step 1: `src/minimegatron/model/config.py`, the validated `ModelConfig` dataclass,
-YAML loading that rejects unknown keys, tiny/small/medium presets, and `tests/unit/test_config.py`.
+Milestone 1, step 2: `src/minimegatron/model/attention.py`. Causal self-attention with an
+explicit `reference` path and an `sdpa` backend, per-head `[h, 3, d_h]` QKV layout (D6), and
+tests: shapes, behavioral causality, reference vs. SDPA equivalence, float64 gradcheck.
 
 Full M1 design (math, decisions, tests, exit criteria):
 [milestones/M1_gpt_baseline.md](milestones/M1_gpt_baseline.md).
@@ -31,7 +32,7 @@ Build order: config → attention → layers → GPT model → synthetic data �
 
 ### Milestone 1 — Functional GPT baseline
 - [x] Milestone scoped ([M1_gpt_baseline.md](milestones/M1_gpt_baseline.md))
-- [ ] Model config + validation
+- [x] Model config + validation (`config.py`, `model/config.py`, `experiment.py`, `configs/*.yaml`)
 - [ ] Reference attention + SDPA backend
 - [ ] Norms, MLP, transformer block
 - [ ] Full GPT model; param counts match formula (tiny 11,487,360 / small 51,237,888 / medium 124,475,904)
@@ -89,6 +90,15 @@ commit that produced them.
 ## Session log
 
 Newest first.
+
+### 2026-10-23 — M1 step 1: model config
+- `ModelConfig` (frozen, validates on construction, reports all errors at once, analytic
+  `num_params()`), strict `from_dict` (rejects unknown keys with "did you mean"), `load_yaml`,
+  `load_config` → `ExperimentConfig(model)`, and tiny/small/medium YAML presets.
+- `tests/conftest.py` (`REPO_ROOT`, `nano_config` fixture), `tests/unit/test_config.py`.
+- **31 tests passed** on CPU. Preset counts in code: tiny 11,487,360 / small 51,237,888 /
+  medium 124,475,904, and the GPT-2 anchor 124,439,808 is now asserted in a test.
+- Removed Claude co-author trailers from history (force-push); CLAUDE.md now forbids them.
 
 ### 2026-10-23 — Milestone 1 scoped
 - Wrote `docs/milestones/M1_gpt_baseline.md`: build order, attention/norm/MLP/init math,

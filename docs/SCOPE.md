@@ -341,6 +341,8 @@ minimegatron/
 │   ├── ddp_2gpu.yaml  fsdp_2gpu.yaml  tp_2gpu.yaml
 │   └── benchmark.yaml
 ├── src/minimegatron/
+│   ├── config.py       # ConfigError, strict dict->dataclass, YAML loading
+│   ├── experiment.py   # ExperimentConfig: model/data/train/distributed sections
 │   ├── model/          attention.py  transformer.py  layers.py  config.py
 │   ├── training/       trainer.py  optimizer.py  checkpoint.py  metrics.py
 │   ├── distributed/

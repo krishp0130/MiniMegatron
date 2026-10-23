@@ -87,3 +87,18 @@ Synthetic dataset items are a pure function of `(seed, index)`, and the batch at
 a pure function of `(seed, s)`. This makes resume exact without saving dataloader state and makes
 DDP sharding reproducible.
 
+### D10 — Strict configuration loading
+- Config dataclasses are **frozen** and validate in `__post_init__`, so an invalid or mutated
+  config can't exist once a model is built from it.
+- Validation **collects every error** and raises one `ConfigError` (a `ValueError` subclass), so a
+  broken YAML is fixed in one pass, not one error per run.
+- **Unknown keys are rejected** (with a difflib "did you mean" hint): a typo like `n_layer` would
+  otherwise silently keep the default. Missing required keys are rejected too.
+- `bool` is rejected where an int is expected (`True` is an `int` subclass in Python).
+- YAML files in `configs/` are the **single source of truth** for presets; there is no duplicate
+  preset table in code. Tests load the YAML and assert exact parameter counts.
+- Module split: generic helpers (`ConfigError`, `from_dict`, `load_yaml`) live in
+  `minimegatron/config.py`; section composition (`ExperimentConfig`, `load_config`) lives in
+  `minimegatron/experiment.py`. Any section's config (model, train, data) imports the helpers with
+  no import cycle.
+

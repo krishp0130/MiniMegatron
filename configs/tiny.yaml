@@ -1,0 +1,11 @@
+# tiny: 11,487,360 params, 84% of them in the token embedding. Small enough to train on a laptop.
+model:
+  vocab_size: 50304        # GPT-2 BPE (50257) padded to a multiple of 128
+  seq_len: 256
+  n_layers: 4
+  n_heads: 4               # head_dim = 48 (deliberately not a power of two)
+  d_model: 192
+  d_ff: 768
+  dropout: 0.0
+  attention_backend: reference
+  norm_type: layernorm
