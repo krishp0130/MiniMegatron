@@ -13,15 +13,12 @@ checklist items, add a session-log entry, and rewrite "Next up". Scope lives in
 
 ## Next up
 
-Milestone 1, step 1: `src/minimegatron/model/config.py`, a validated model config dataclass with
-tiny/small/medium presets and unit tests for validation (e.g. `d_model % n_heads == 0`).
+Milestone 1, step 1: `src/minimegatron/model/config.py`, the validated `ModelConfig` dataclass,
+YAML loading that rejects unknown keys, tiny/small/medium presets, and `tests/unit/test_config.py`.
 
-Planned order within Milestone 1:
-1. `model/config.py` + config validation tests
-2. `model/attention.py`: explicit reference attention + SDPA backend, equivalence and causal-mask tests
-3. `model/layers.py`: LayerNorm/RMSNorm, MLP, pre-norm block
-4. `model/transformer.py`: full GPT, parameter-count tests for presets
-5. `data/synthetic.py`, `training/` loop, CPU smoke test, overfit-a-tiny-batch test
+Full M1 design (math, decisions, tests, exit criteria):
+[milestones/M1_gpt_baseline.md](milestones/M1_gpt_baseline.md).
+Build order: config → attention → layers → GPT model → synthetic data → training engine.
 
 ## Milestone checklist
 
@@ -33,14 +30,15 @@ Planned order within Milestone 1:
 - [x] Context docs: CLAUDE.md, SCOPE.md, PROGRESS.md, ISSUES.md
 
 ### Milestone 1 — Functional GPT baseline
+- [x] Milestone scoped ([M1_gpt_baseline.md](milestones/M1_gpt_baseline.md))
 - [ ] Model config + validation
 - [ ] Reference attention + SDPA backend
 - [ ] Norms, MLP, transformer block
-- [ ] Full GPT model + tiny/small/medium configs with reported parameter counts
+- [ ] Full GPT model; param counts match formula (tiny 11,487,360 / small 51,237,888 / medium 124,475,904)
 - [ ] Synthetic dataset
 - [ ] Single-device training loop (AdamW, warmup + cosine, grad accumulation, clipping)
 - [ ] Checkpoint save/resume (model, optimizer, scheduler, RNG)
-- [ ] CPU smoke test + overfit test
+- [ ] Loss-at-init ≈ ln V test, overfit test, bitwise resume test, CPU smoke test
 - [ ] `python -m minimegatron.train --config configs/tiny.yaml` works
 
 ### Milestone 2 — Distributed data parallel
@@ -91,6 +89,14 @@ commit that produced them.
 ## Session log
 
 Newest first.
+
+### 2026-10-23 — Milestone 1 scoped
+- Wrote `docs/milestones/M1_gpt_baseline.md`: build order, attention/norm/MLP/init math,
+  optimizer and schedule, checkpoint and resume design, test list, exit criteria.
+- Fixed presets (vocab 50304): tiny 11.49M, small 51.24M, medium 124.48M params. The analytic
+  formula reproduces GPT-2 small's 124,439,808 at V=50257 (checked by hand, not yet in code).
+- New decisions D6–D9 in ISSUES.md (per-head QKV layout, vocab padding, weight tying,
+  index-deterministic data).
 
 ### 2026-10-23 — Project setup
 - Created repo, venv (Python 3.12.14, torch 2.14.1, numpy 2.5.4, pytest 9.1.1, tokenizers 0.23.3,

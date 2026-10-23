@@ -66,3 +66,24 @@ can replace them with column/row-parallel layers without restructuring the model
 ### D5 — Optional dependency extras
 Core install is torch + numpy + pyyaml. `dev` (pytest), `text` (tokenizers), `logging`
 (tensorboard), and `gpu` (triton, Linux only) are extras.
+
+### D6 — Per-head fused QKV layout `[h, 3, d_h]`
+The fused `qkv` projection output is viewed as `(B, T, n_heads, 3, head_dim)`, i.e. each head's
+q, k, v are contiguous. Column-parallel TP (M4) splits that dimension into contiguous chunks, so
+each rank then owns complete heads. GPT-2's `[3, h, d_h]` layout would hand rank 0 all the queries
+and half the keys. Trade-off: loading GPT-2 pretrained weights would require a permutation (not
+planned).
+
+### D7 — Vocab padded to 50304
+GPT-2 BPE (50257) is padded to a multiple of 128 for aligned GPU matmuls and TP divisibility. The
+padded token ids are never produced by the tokenizer.
+
+### D8 — Tied input embedding / LM head
+Saves V·d params (9.7M in tiny) and matches GPT-2. FSDP2 must keep both uses in the root sharding
+unit; TP keeps both replicated in the basic version.
+
+### D9 — Index-deterministic datasets and step-deterministic batching
+Synthetic dataset items are a pure function of `(seed, index)`, and the batch at global step `s` is
+a pure function of `(seed, s)`. This makes resume exact without saving dataloader state and makes
+DDP sharding reproducible.
+

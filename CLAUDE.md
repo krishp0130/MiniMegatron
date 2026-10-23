@@ -8,6 +8,8 @@ FSDP2, tensor parallelism, Triton kernels, correctness and benchmark harness).
 1. `docs/PROGRESS.md`: current milestone, what's done, what's next, session log
 2. `docs/ISSUES.md`: known problems, environment workarounds, design decisions
 3. `docs/SCOPE.md`: full specification and milestone definitions (source of truth for scope)
+4. `docs/milestones/M<n>_*.md`: detailed design for the active milestone (math, decisions, tests,
+   exit criteria). Each milestone is scoped in its own doc before implementation starts.
 
 ## How this project is worked on
 
