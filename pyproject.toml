@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minimegatron"
+version = "0.0.1"
+description = "Educational distributed transformer training framework inspired by Megatron-LM"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "torch==2.14.1",
+    "numpy>=2.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+text = ["tokenizers>=0.20"]
+logging = ["tensorboard>=2.17"]
+# Triton ships Linux-only wheels; it needs an NVIDIA GPU to be useful anyway.
+gpu = ["triton; sys_platform == 'linux'"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: requires a CUDA GPU",
+    "multigpu: requires 2+ CUDA GPUs",
+    "distributed: launches multiple processes",
+    "slow: takes more than a few seconds",
+]
