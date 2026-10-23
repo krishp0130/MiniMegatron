@@ -2,7 +2,8 @@
 
 An educational, engineering-quality distributed transformer training framework inspired by
 [NVIDIA Megatron-LM](https://github.com/NVIDIA/Megatron-LM): a GPT-style decoder, a training
-engine, DDP and FSDP2 data parallelism, a custom Triton kernel, and a correctness/benchmarking
+engine, DDP and FSDP2 data parallelism, Megatron-style tensor parallelism, a custom Triton
+kernel, and a correctness/benchmarking
 harness.
 
 > **Guiding principle:** every optimization has a reference implementation, a correctness test,
@@ -12,22 +13,26 @@ harness.
 
 | Milestone | Scope | Status |
 |---|---|---|
-| 0. Setup | Repo, environment, packaging | done |
+| 0. Setup | Repo, environment, packaging, context docs | done |
 | 1. Functional GPT baseline | Model, synthetic data, single-device training, unit tests | not started |
-| 2. Distributed training | DDP, gradient sync validation, rank-aware logging | not started |
+| 2. Distributed data parallel | DDP, gradient sync validation, rank-aware logging | not started |
 | 3. Memory optimization | BF16, FSDP2, sharded checkpoints, memory measurements | not started |
-| 4. GPU kernel optimization | Triton RMSNorm, forward and backward, benchmarks | not started |
-| 5. Reliability engineering | Regression and distributed tests, failure injection, CI | not started |
-| 6. Documentation | Architecture, experiments, results tables | not started |
+| 4. Tensor parallelism | Megatron-style column/row-parallel MLP and attention | not started |
+| 5. GPU kernel optimization | Triton RMSNorm, forward and backward, benchmarks | not started |
+| 6. Reliability engineering | Regression and distributed tests, failure injection, CI | not started |
+| 7. Documentation | Architecture, experiments, results tables | not started |
+
+Detailed status: [docs/PROGRESS.md](docs/PROGRESS.md) · Scope: [docs/SCOPE.md](docs/SCOPE.md) ·
+Known issues and decisions: [docs/ISSUES.md](docs/ISSUES.md)
 
 ## Hardware support
 
 | Environment | What runs |
 |---|---|
-| CPU (any OS) | Model correctness tests, smoke training, **multi-process DDP/FSDP2 correctness via the `gloo` backend** |
+| CPU (any OS) | Model correctness tests, smoke training, **multi-process DDP/FSDP2/TP correctness via the `gloo` backend** |
 | Apple Silicon (MPS) | Single-device training |
 | 1× NVIDIA GPU | Single-GPU training, BF16, Triton kernels, benchmarks |
-| 2+ NVIDIA GPUs | NCCL DDP/FSDP2 training and scaling benchmarks |
+| 2+ NVIDIA GPUs | NCCL DDP/FSDP2/TP training and scaling benchmarks |
 
 Multi-GPU (NCCL) and Triton results are **pending verification on NVIDIA hardware** until
 explicitly recorded in `results/`.
@@ -62,7 +67,7 @@ configs/              YAML experiment configs
 src/minimegatron/
   model/              GPT model: attention, blocks, config
   training/           trainer, optimizer and schedule, checkpointing, metrics
-  distributed/        process-group setup, DDP, FSDP2, educational collectives demo
+  distributed/        process-group setup, DDP, FSDP2, tensor parallelism, collectives demo
   kernels/            Triton kernels and their PyTorch references
   data/               synthetic and text datasets
   benchmarks/         benchmark harness and profiler helpers
