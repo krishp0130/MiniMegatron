@@ -67,3 +67,6 @@ GLOO_SOCKET_IFNAME=lo0 .venv/bin/torchrun --nnodes=1 --nproc_per_node=2 \
 
 Commit coherent units of work after tests pass, and push to `origin main`
 (github.com/krishp0130/MiniMegatron).
+
+Commits are authored by the owner only: no `Co-Authored-By` or other AI attribution trailers in
+commit messages or PR descriptions.
