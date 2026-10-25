@@ -102,3 +102,11 @@ DDP sharding reproducible.
   `minimegatron/experiment.py`. Any section's config (model, train, data) imports the helpers with
   no import cycle.
 
+### D11 — Equivalence tests can't catch bugs in shared code
+Reference-vs-optimized comparisons only test the part that differs between the two paths. Both
+attention backends share `split_qkv` and the projections, so a wrong QKV layout passes every
+equivalence test (confirmed by mutation, 2026-10-25). Shared code needs its own direct
+property tests (here: `test_qkv_layout_splits_into_whole_heads`, plus behavioral causality and
+gradcheck). Apply the same rule to TP, FSDP, and Triton: every comparison test needs an
+independent property test for the code both sides share.
+

@@ -6,16 +6,16 @@ checklist items, add a session-log entry, and rewrite "Next up". Scope lives in
 
 ## Current state
 
-- **Active milestone:** 1 (Functional GPT baseline), step 1 of 6 done
+- **Active milestone:** 1 (Functional GPT baseline), steps 1–2 of 6 done
 - **Last updated:** 2026-10-23
-- **Test status:** 31 passed (`pytest tests/unit -q`, CPU)
+- **Test status:** 63 passed (`pytest tests/unit tests/numerical -q`, CPU + MPS)
 - **Verified hardware:** Apple M4 Pro (CPU + MPS). No NVIDIA GPU verification yet.
 
 ## Next up
 
-Milestone 1, step 2: `src/minimegatron/model/attention.py`. Causal self-attention with an
-explicit `reference` path and an `sdpa` backend, per-head `[h, 3, d_h]` QKV layout (D6), and
-tests: shapes, behavioral causality, reference vs. SDPA equivalence, float64 gradcheck.
+Milestone 1, step 3: `src/minimegatron/model/layers.py`. Hand-written `RMSNorm` (tested against
+`torch.nn.RMSNorm`; it becomes the Triton reference in M5), a norm factory for
+`layernorm`/`rmsnorm`, the GELU MLP (`fc1`/`fc2`), and the pre-norm `Block`.
 
 Full M1 design (math, decisions, tests, exit criteria):
 [milestones/M1_gpt_baseline.md](milestones/M1_gpt_baseline.md).
@@ -33,7 +33,7 @@ Build order: config → attention → layers → GPT model → synthetic data �
 ### Milestone 1 — Functional GPT baseline
 - [x] Milestone scoped ([M1_gpt_baseline.md](milestones/M1_gpt_baseline.md))
 - [x] Model config + validation (`config.py`, `model/config.py`, `experiment.py`, `configs/*.yaml`)
-- [ ] Reference attention + SDPA backend
+- [x] Reference attention + SDPA backend (`model/attention.py`)
 - [ ] Norms, MLP, transformer block
 - [ ] Full GPT model; param counts match formula (tiny 11,487,360 / small 51,237,888 / medium 124,475,904)
 - [ ] Synthetic dataset
@@ -90,6 +90,19 @@ commit that produced them.
 ## Session log
 
 Newest first.
+
+### 2026-10-25 — M1 step 2: causal self-attention
+- `model/attention.py`: `split_qkv` (per-head `[h, 3, d_h]` layout), `reference_attention`
+  (explicit math, non-persistent causal-mask buffer), and `CausalSelfAttention` with
+  `reference`/`sdpa` backends sharing identical state_dict keys.
+- Tests: `tests/unit/test_attention.py` (shapes, behavioral causality, seq_len guard, state_dict
+  keys, whole-head split for TP, dropout train/eval) and `tests/numerical/test_attention_backends.py`
+  (reference vs. SDPA forward and backward across 3 shapes including head_dim 48 and 1 head,
+  extreme input scales, float64 gradcheck of the function and module, MPS vs. CPU).
+- **63 passed** (CPU; the 2 MPS tests ran on the M4 Pro).
+- Mutation check (bugs injected by hand, then reverted): deleting the mask → 13 failures;
+  dropping 1/√d_h → 9 failures; GPT-2 `[3, h, d_h]` layout → 1 failure (only the layout test,
+  because both backends share `split_qkv`; see ISSUES.md D11).
 
 ### 2026-10-23 — M1 step 1: model config
 - `ModelConfig` (frozen, validates on construction, reports all errors at once, analytic
