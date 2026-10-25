@@ -6,16 +6,17 @@ checklist items, add a session-log entry, and rewrite "Next up". Scope lives in
 
 ## Current state
 
-- **Active milestone:** 1 (Functional GPT baseline), steps 1–2 of 6 done
+- **Active milestone:** 1 (Functional GPT baseline), steps 1–3 of 6 done
 - **Last updated:** 2026-10-23
-- **Test status:** 63 passed (`pytest tests/unit tests/numerical -q`, CPU + MPS)
+- **Test status:** 92 passed (`pytest tests/unit tests/numerical -q`, CPU + MPS)
 - **Verified hardware:** Apple M4 Pro (CPU + MPS). No NVIDIA GPU verification yet.
 
 ## Next up
 
-Milestone 1, step 3: `src/minimegatron/model/layers.py`. Hand-written `RMSNorm` (tested against
-`torch.nn.RMSNorm`; it becomes the Triton reference in M5), a norm factory for
-`layernorm`/`rmsnorm`, the GELU MLP (`fc1`/`fc2`), and the pre-norm `Block`.
+Milestone 1, step 4: `src/minimegatron/model/transformer.py`. The full `GPT` (token + position
+embeddings, `Block` × L, final norm, tied LM head, cross-entropy), GPT-2 init with residual
+projections scaled by 1/√(2L), and tests: param count == formula, loss at init ≈ ln V, tied
+weights share storage, gradients reach every parameter, reference vs. SDPA logits match.
 
 Full M1 design (math, decisions, tests, exit criteria):
 [milestones/M1_gpt_baseline.md](milestones/M1_gpt_baseline.md).
@@ -34,7 +35,7 @@ Build order: config → attention → layers → GPT model → synthetic data �
 - [x] Milestone scoped ([M1_gpt_baseline.md](milestones/M1_gpt_baseline.md))
 - [x] Model config + validation (`config.py`, `model/config.py`, `experiment.py`, `configs/*.yaml`)
 - [x] Reference attention + SDPA backend (`model/attention.py`)
-- [ ] Norms, MLP, transformer block
+- [x] Norms, MLP, transformer block (`model/layers.py`)
 - [ ] Full GPT model; param counts match formula (tiny 11,487,360 / small 51,237,888 / medium 124,475,904)
 - [ ] Synthetic dataset
 - [ ] Single-device training loop (AdamW, warmup + cosine, grad accumulation, clipping)
@@ -90,6 +91,19 @@ commit that produced them.
 ## Session log
 
 Newest first.
+
+### 2026-10-25 — M1 step 3: norms, MLP, block
+- `model/layers.py`: functional `rms_norm` (the M5 Triton reference) + `RMSNorm` module,
+  `make_norm` (LayerNorm/RMSNorm per config), position-wise GELU `MLP` (`fc1`/`fc2`), pre-norm `Block`.
+- Tests: `tests/unit/test_layers.py` (norm factory, MLP is position-wise, block param count ==
+  config formula for 4 variants, block is identity when sublayer outputs are zeroed, causality,
+  gradients reach all params) and `tests/numerical/test_norms.py` (vs. `torch.nn.RMSNorm` on 5
+  shapes incl. non-power-of-two widths, bf16 vs. fp32 computation, unit-RMS property,
+  zero/tiny/huge inputs, float64 gradcheck, exact-vs-tanh GELU < 1e-3).
+- **Bug found by gradcheck:** `x.float()` downcast float64 inputs to float32. Fixed by promoting
+  to at least float32 (ISSUES.md #4).
+- **92 passed.** Mutation check: post-norm block → 1 failure (identity test); RMSNorm without
+  eps → 5 failures.
 
 ### 2026-10-25 — M1 step 2: causal self-attention
 - `model/attention.py`: `split_qkv` (per-head `[h, 3, d_h]` layout), `reference_attention`

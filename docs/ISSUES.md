@@ -16,6 +16,16 @@ the fix rather than deleting them.
 
 ## Resolved issues
 
+### #4 — `rms_norm` silently downcast float64 inputs to float32
+- **Status:** resolved (2026-10-25)
+- **Symptom:** float64 `gradcheck` of `rms_norm` failed: numerical and analytical Jacobians
+  differed around the 3rd decimal place.
+- **Cause:** "compute statistics in fp32" was written as `x.float()`, which *converts to* float32,
+  so it is an upcast for bf16 but a downcast for float64.
+- **Fix:** `x.to(torch.promote_types(x.dtype, torch.float32))`: at least float32, never lower. Use
+  the same pattern for every "upcast for numerical stability" site (the Triton kernel and its
+  wrappers in M5 included).
+
 ### #1 — torchrun + gloo hangs on macOS
 - **Status:** resolved (workaround)
 - **Symptom:** `torchrun --standalone --nproc_per_node=2 ...` hangs indefinitely at process-group
