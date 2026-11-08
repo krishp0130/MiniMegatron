@@ -23,7 +23,7 @@ def test_single_is_valid_in_one_process():
     assert resolve_strategy("single", 1) == "single"
 
 
-@pytest.mark.parametrize("strategy", ["ddp", "fsdp"])
+@pytest.mark.parametrize("strategy", ["ddp", "fsdp", "tp"])
 def test_strategies_needing_peers_are_rejected_in_one_process(strategy):
     """No silent downgrade: a run that quietly trains differently from its config is worse than
     one that stops and says so."""

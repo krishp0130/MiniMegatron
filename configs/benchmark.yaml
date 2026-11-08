@@ -1,0 +1,40 @@
+# Benchmark configuration. Measures the tiny preset; override anything per run with --set.
+#
+#   python -m minimegatron.benchmarks.run --config configs/benchmark.yaml --label fp32-cpu
+#   python -m minimegatron.benchmarks.run --config configs/benchmark.yaml --label bf16-cpu \
+#       --set train.precision=bf16
+#
+# Results append to results/benchmarks.jsonl and the Markdown table is rewritten from the file,
+# so the comparisons in SCOPE.md section 9 are made by running this with different overrides.
+model:
+  vocab_size: 50304
+  seq_len: 256
+  n_layers: 4
+  n_heads: 4
+  d_model: 192
+  d_ff: 768
+  dropout: 0.0
+
+data:
+  dataset: random          # unlearnable, so the data costs nothing and there is no learning curve
+  n_items: 4096
+  seed: 0
+
+train:
+  max_steps: 100           # unused by the benchmark runner, which steps `benchmark.*` times
+  micro_batch_size: 8
+  grad_accum_steps: 1
+  lr: 6.0e-4
+  warmup_steps: 10
+  device: auto
+  precision: fp32
+  seed: 1337
+  out_dir: runs/benchmark
+  log_interval: 0
+  eval_interval: 0
+
+benchmark:
+  warmup_steps: 3
+  measure_steps: 10
+  repeats: 3
+  label: default

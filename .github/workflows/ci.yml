@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: CPU test suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30  # a hung collective must fail the job, not run until the runner limit
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"  # D1: broadest wheel coverage for torch/triton/tokenizers
+          cache: pip
+
+      - name: Install (CPU-only torch)
+        run: |
+          python -m pip install --upgrade pip
+          # The CPU index keeps the CUDA wheels (~2.5 GB) off the runner. The version still comes
+          # from pyproject's exact pin, so CI and local runs agree (D1).
+          pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
+
+      - name: Environment report
+        run: python scripts/check_env.py
+
+      - name: Check the marker filter still selects the real tests
+        run: |
+          # A typo in the deselection below would silently run almost nothing and still pass.
+          # Fail loudly instead if the collected count collapses.
+          COUNT=$(python -m pytest -q --collect-only -m "not gpu and not multigpu" \
+                  | tail -2 | grep -oE '[0-9]+ test' | grep -oE '[0-9]+')
+          echo "collected $COUNT tests"
+          test "$COUNT" -ge 300 || { echo "::error::only $COUNT tests collected, expected >= 300"; exit 1; }
+
+      - name: Run tests
+        env:
+          # gloo picks an unreachable interface from the hostname unless pinned. On Linux the
+          # loopback device is `lo` (`lo0` on macOS) -- the test harness picks per platform, and
+          # this covers anything launched through torchrun directly (ISSUES #1).
+          GLOO_SOCKET_IFNAME: lo
+        # The 2-process gloo tests DO run here: they are the project's main correctness evidence
+        # and need no GPU (D2). Only genuinely GPU-dependent tests are deselected.
+        run: python -m pytest -q -m "not gpu and not multigpu"
+
+      - name: Benchmark smoke run
+        # Not a performance gate -- shared runners are far too noisy for that (SCOPE.md 8).
+        # This only proves the harness and the documented CLI still work.
+        run: |
+          python -m minimegatron.benchmarks.run --config configs/benchmark.yaml \
+            --label ci-smoke --no-store \
+            --set train.device=cpu --set benchmark.warmup_steps=1 \
+            --set benchmark.measure_steps=2 --set benchmark.repeats=2

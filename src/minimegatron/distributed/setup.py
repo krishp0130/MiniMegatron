@@ -121,7 +121,7 @@ def resolve_strategy(spec: str, world_size: int) -> str:
     """
     if spec == "auto":
         return "single" if world_size == 1 else "ddp"
-    if spec in ("ddp", "fsdp") and world_size == 1:
+    if spec in ("ddp", "fsdp", "tp") and world_size == 1:
         raise ConfigError(
             f"strategy {spec!r} needs more than one rank, but world_size is 1; "
             "launch with torchrun --nproc_per_node=N, or use strategy 'single'"

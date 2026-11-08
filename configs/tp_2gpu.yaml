@@ -1,0 +1,43 @@
+# tp on 2 devices. Launch with torchrun:
+#
+#   GLOO_SOCKET_IFNAME=lo0 torchrun --nnodes=1 --nproc_per_node=2 \
+#       --master_addr=127.0.0.1 --master_port=29500 \
+#       -m minimegatron.train --config configs/tp_2gpu.yaml
+#
+# On 2 NVIDIA GPUs, --standalone works and the backend resolves to nccl automatically.
+model:
+  vocab_size: 50304
+  seq_len: 256
+  n_layers: 4
+  n_heads: 4               # divisible by tp_size, which tensor parallelism requires
+  d_model: 192
+  d_ff: 768                # likewise
+  dropout: 0.0
+
+data:
+  dataset: random
+  n_items: 8192
+  seed: 0
+
+train:
+  max_steps: 100
+  micro_batch_size: 8
+  grad_accum_steps: 2
+  # TP ranks are not data-parallel ranks, so the global batch is micro x accum x 1 (D24).
+  global_batch_size: 16
+  lr: 6.0e-4
+  warmup_steps: 10
+  grad_clip: 1.0
+  device: auto
+  precision: fp32          # bf16 needs Ampere or newer; it errors clearly on older cards
+  seed: 1337
+  log_interval: 10
+  eval_interval: 50
+  eval_steps: 5
+  ckpt_interval: 50
+  out_dir: runs/tp_2gpu
+
+distributed:
+  backend: auto             # nccl on CUDA, gloo on CPU
+  strategy: tp
+  tp_size: 0               # 0 = the whole world

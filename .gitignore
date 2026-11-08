@@ -11,7 +11,10 @@ runs/
 *.pt
 *.safetensors
 results/**/*.json
+results/**/*.jsonl
 results/**/traces/
+results/benchmarks.md
+# Baselines ARE versioned: performance regressions are measured against them (SCOPE.md 8).
 !results/baselines/*.json
 
 .DS_Store

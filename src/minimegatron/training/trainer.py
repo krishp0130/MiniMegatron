@@ -7,6 +7,7 @@ parallelism (M4) must all reproduce the losses and gradients this loop produces.
 from __future__ import annotations
 
 import contextlib
+import math
 import random
 import time
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel
 from torch.nn.utils import clip_grad_norm_
@@ -192,8 +194,12 @@ class Trainer:
         self.train_stream = BatchStream(
             build_dataset(cfg.data, cfg.model, "train"), micro, cfg.data.seed, **shard
         )
+        # The validation stream is deliberately NOT sharded: `eval_steps` counts *global*
+        # evaluation batches, and `evaluate()` distributes those batches across ranks instead.
+        # That keeps the evaluation set exactly eval_steps x micro_batch_size samples whatever the
+        # world size, so validation loss is comparable across strategies (ISSUES #8).
         self.val_stream = BatchStream(
-            build_dataset(cfg.data, cfg.model, "val"), micro, cfg.data.val_seed, **shard
+            build_dataset(cfg.data, cfg.model, "val"), micro, cfg.data.val_seed
         )
 
         self.step = 0
@@ -259,6 +265,29 @@ class Trainer:
             self.model.set_requires_gradient_sync(True)
             self.model.set_is_last_backward(True)
 
+    def _out_of_memory_message(self, exc: BaseException) -> str:
+        """Turn an OOM into advice, naming the knobs that actually help and their current values.
+
+        The raw message says how many bytes failed to allocate, which tells you nothing you can
+        act on. These four levers do, in increasing order of disruption, and the point of listing
+        the *current* settings is that the next thing a reader needs is "what is it now".
+        """
+        train = self.cfg.train
+        return (
+            f"out of memory on {self.device} during training step {self.step}.\n"
+            f"current settings: strategy={self.strategy}, precision={train.precision}, "
+            f"micro_batch_size={train.micro_batch_size}, "
+            f"grad_accum_steps={train.grad_accum_steps}, seq_len={self.cfg.model.seq_len}\n"
+            "options, least disruptive first:\n"
+            "  - halve train.micro_batch_size and double train.grad_accum_steps "
+            "(same global batch, same maths, less peak memory)\n"
+            "  - set train.precision: bf16 (needs Ampere or newer on CUDA)\n"
+            "  - set distributed.strategy: fsdp to shard parameters, gradients and optimizer "
+            "state across ranks\n"
+            "  - reduce model.seq_len, remembering attention memory is quadratic in it\n"
+            f"original error: {exc}"
+        )
+
     def train_step(self) -> dict[str, Any]:
         """Run `grad_accum_steps` micro-batches, then one optimizer step."""
         cfg = self.cfg.train
@@ -273,12 +302,17 @@ class Trainer:
             with self._sync_context(is_last_micro_batch=j == accum - 1):
                 x, y = self.train_stream.micro_batch(self.step * accum + j)
                 x, y = x.to(self.device), y.to(self.device)
-                with self._autocast():
-                    _, loss = self.model(x, y)
-                # Gradients SUM across backward() calls, so scaling each micro-loss by 1/accum
-                # makes the accumulated gradient exactly the gradient of the mean loss over the
-                # global batch -- identical to one large batch, up to float rounding.
-                (loss / accum).backward()
+                try:
+                    with self._autocast():
+                        _, loss = self.model(x, y)
+                    # Gradients SUM across backward() calls, so scaling each micro-loss by
+                    # 1/accum makes the accumulated gradient exactly the gradient of the mean
+                    # loss over the global batch -- identical to one large batch, up to rounding.
+                    (loss / accum).backward()
+                except torch.OutOfMemoryError as exc:
+                    # Re-raised, never swallowed: the run must still fail. Only the diagnostic
+                    # improves, from a byte count to the knobs that change it.
+                    raise torch.OutOfMemoryError(self._out_of_memory_message(exc)) from exc
             loss_sum += loss.detach()  # kept on device: one sync per step, not one per micro-batch
 
         # Clipping must come *after* the synchronizing backward, and on the unwrapped module's
@@ -322,16 +356,40 @@ class Trainer:
         """
         self.model.eval()
         total = torch.zeros((), device=self.device)
-        for j in range(self.cfg.train.eval_steps):
-            x, y = self.val_stream.micro_batch(j)
+        count = torch.zeros((), device=self.device)
+
+        # Global batch j goes to rank j % dp_world_size, so the union of the batches evaluated is
+        # exactly 0..eval_steps-1 regardless of world size -- which is what makes the number
+        # comparable across strategies (ISSUES #8).
+        #
+        # Every rank must run the SAME NUMBER of forward passes, even when eval_steps does not
+        # divide the world size. Under FSDP the forward itself contains collectives (the per-unit
+        # all-gather), so a rank that exits the loop early leaves its peers blocked in an
+        # all-gather that will never complete -- a deadlock, not a wrong number (ISSUES #13).
+        # So each rank runs ceil(eval_steps / dp_world_size) passes and the surplus ones are
+        # computed but given zero weight.
+        eval_steps = self.cfg.train.eval_steps
+        passes = math.ceil(eval_steps / self.dp_world_size)
+        for i in range(passes):
+            j = self.dp_rank + i * self.dp_world_size
+            # Wrap the index so the surplus pass is still a valid batch; its result is discarded.
+            x, y = self.val_stream.micro_batch(j % eval_steps)
             # The unwrapped module: a DDP forward here would only add reducer bookkeeping, and
             # there is no backward to synchronize.
             with self._autocast():
                 _, loss = self.raw_model(x.to(self.device), y.to(self.device))
-            total += loss
+            weight = 1.0 if j < eval_steps else 0.0
+            total += loss * weight
+            count += weight
         self.model.train()
-        # Each rank evaluated its own shard of equal size, so the mean of the means is the mean.
-        return all_reduce_mean(total / self.cfg.train.eval_steps).item()
+
+        # Reduce the SUM and the COUNT, not each rank's mean. When dp_world_size does not divide
+        # eval_steps the ranks evaluate different numbers of batches, and averaging their means
+        # would weight the short rank too heavily -- the unequal-shard trap from D24, one level up.
+        if self.dp_world_size > 1:
+            dist.all_reduce(total, op=dist.ReduceOp.SUM)
+            dist.all_reduce(count, op=dist.ReduceOp.SUM)
+        return (total / count).item() if count.item() > 0 else float("nan")
 
     # --- the run --------------------------------------------------------------------------------
 

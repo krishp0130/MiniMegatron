@@ -19,7 +19,7 @@ harness.
 | 3. Memory optimization | BF16, FSDP2, sharded checkpoints, memory measurements | **done** (memory numbers pending GPU) |
 | 4. Tensor parallelism | Megatron-style column/row-parallel MLP and attention | **done** (benchmarks pending GPU) |
 | 5. GPU kernel optimization | Triton RMSNorm, forward and backward, benchmarks | not started |
-| 6. Reliability engineering | Regression and distributed tests, failure injection, CI | not started |
+| 6. Reliability engineering | Regression and distributed tests, failure injection, CI | **done** |
 | 7. Documentation | Architecture, experiments, results tables | not started |
 
 Detailed status: [docs/PROGRESS.md](docs/PROGRESS.md) · Scope: [docs/SCOPE.md](docs/SCOPE.md) ·
@@ -97,6 +97,27 @@ Implemented by hand with explicit autograd functions and collectives rather than
 
 `n_heads % tp_size` and `d_ff % tp_size` are validated at startup. TP writes a per-rank checkpoint
 for resume plus a gathered `_full.pt` that loads into a plain single-device model.
+
+### Testing and benchmarking
+
+```bash
+.venv/bin/pytest -q                              # everything (~2 min, includes 2-process gloo)
+.venv/bin/pytest -q -m "not distributed"         # fast inner loop
+.venv/bin/pytest tests/regression -q             # golden trajectories and structural invariants
+.venv/bin/pytest tests/fault_injection -q        # controlled failures and their diagnostics
+
+# Measure. Appends JSON to results/benchmarks.jsonl and rewrites a Markdown table.
+.venv/bin/python -m minimegatron.benchmarks.run --config configs/benchmark.yaml --label fp32-cpu
+
+# Compare against a versioned baseline. A warning, not a test: these numbers are noisy.
+.venv/bin/python -m minimegatron.benchmarks.regression \
+    --baseline results/baselines/tiny_cpu_fp32.json --current results/benchmarks.jsonl
+```
+
+Functional invariants are asserted hard; performance is compared against
+[`results/baselines/`](results/baselines/) and only *warns*. Unmeasurable fields (GPU memory on a
+CPU box) are recorded as `null`, never as 0 and never estimated. CI runs the CPU-safe suite,
+including the 2-process gloo tests, on every push.
 
 ## Hardware support
 

@@ -1,0 +1,60 @@
+{
+  "commit": "7b8313e",
+  "device": "cpu",
+  "device_step_ms": null,
+  "dp_world_size": 1,
+  "effective_batch_size": 8,
+  "environment": {
+    "bf16_supported": null,
+    "cuda_available": false,
+    "cuda_version": null,
+    "gpu_arch": null,
+    "gpu_count": 0,
+    "gpu_name": null,
+    "mps_available": true,
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "processor": "arm",
+    "python": "3.12.14",
+    "torch": "2.14.1",
+    "triton": null
+  },
+  "grad_accum_steps": 1,
+  "label": "tiny-cpu-fp32",
+  "measure_steps": 10,
+  "micro_batch_size": 8,
+  "non_embedding_params": 1779840,
+  "params": 11487360,
+  "peak_memory_allocated_bytes": null,
+  "peak_memory_reserved_bytes": null,
+  "precision": "fp32",
+  "repeats": 3,
+  "seq_len": 256,
+  "step_latency_ms": {
+    "iqr": 2.457633300218731,
+    "maximum": 114.87051660078578,
+    "median": 112.73381669889204,
+    "minimum": 112.41288330056705,
+    "samples": [
+      112.73381669889204,
+      112.41288330056705,
+      114.87051660078578
+    ]
+  },
+  "strategy": "single",
+  "timestamp": "2026-11-08T20:44:58+00:00",
+  "tokens_per_sec": {
+    "iqr": 389.7825332297434,
+    "maximum": 18218.552356886918,
+    "median": 18166.68733455671,
+    "minimum": 17828.769823657174,
+    "samples": [
+      18166.68733455671,
+      18218.552356886918,
+      17828.769823657174
+    ]
+  },
+  "tokens_per_step": 2048,
+  "tp_size": 1,
+  "warmup_steps": 3,
+  "world_size": 1
+}

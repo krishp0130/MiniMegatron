@@ -7,12 +7,13 @@ from pathlib import Path
 from typing import Any
 
 from minimegatron.config import ConfigError, from_dict, load_yaml
+from minimegatron.benchmarks.config import BenchmarkConfig
 from minimegatron.data.config import DataConfig
 from minimegatron.distributed.config import DistributedConfig
 from minimegatron.model.config import ModelConfig
 from minimegatron.training.config import TrainConfig
 
-SECTIONS = ("model", "data", "train", "distributed")
+SECTIONS = ("model", "data", "train", "distributed", "benchmark")
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,7 @@ class ExperimentConfig:
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     distributed: DistributedConfig = field(default_factory=DistributedConfig)
+    benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
 
 
 def config_from_dict(raw: dict[str, Any], source: str = "config") -> ExperimentConfig:
@@ -40,6 +42,7 @@ def config_from_dict(raw: dict[str, Any], source: str = "config") -> ExperimentC
         distributed=from_dict(
             DistributedConfig, raw.get("distributed", {}), section="distributed"
         ),
+        benchmark=from_dict(BenchmarkConfig, raw.get("benchmark", {}), section="benchmark"),
     )
 
 

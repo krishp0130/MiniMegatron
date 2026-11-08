@@ -14,17 +14,6 @@ the fix rather than deleting them.
   and benchmarks on a rented Linux + NVIDIA machine (1 GPU for Triton/BF16, 2 GPUs for
   DDP/FSDP/TP scaling). All GPU results stay marked *pending* in PROGRESS.md until measured.
 
-### #8 — Validation loss is not comparable across world sizes
-- **Status:** open (documented semantics, not a bug)
-- **Detail:** `eval_steps` counts batches *per rank*, so the validation set covers
-  `eval_steps x micro_batch_size x world_size` samples. A 2-rank run therefore evaluates twice as
-  much data as a 1-rank run and reports a slightly different (better-estimated) number: 10.8641 vs
-  10.8636 on the tiny preset. Training loss and gradients *are* exactly comparable, which is what
-  the equivalence tests pin.
-- **Plan:** if validation curves are ever compared across world sizes, pin the evaluation set to a
-  fixed number of samples rather than a number of per-rank batches. Milestone 6's regression suite
-  is the natural place.
-
 ### #10 — Autocast leaves the residual stream in FP32, so BF16 losses barely move
 - **Status:** open (documented behaviour, not a bug)
 - **Symptom:** a `precision: bf16` run on the tiny preset printed losses *identical to FP32 at four
@@ -43,6 +32,50 @@ the fix rather than deleting them.
   verify a precision mode by the dtype at each op, never by whether the loss changed.
 
 ## Resolved issues
+
+### #14 — Loss at init is *below* ln(V) when the targets are the inputs
+- **Status:** resolved (test-design rule), 2026-11-08
+- **Symptom:** a loss-at-init regression test measured 4.46 against the expected
+  ln(128) = 4.85 and failed, suggesting a broken initialization.
+- **Cause:** the test passed `targets=idx`. With **tied embeddings** the residual stream carries
+  `tok_emb(x[t])`, and the tied LM head scores exactly that token highly -- so "predict the token
+  at this position" is already easy at initialization. Nothing was broken; the task was.
+- **Fix:** draw the targets independently of the inputs, as the Milestone 1 test already did. Any
+  loss-at-init check must use independent targets, or it measures the model's ability to copy
+  rather than its initialization.
+
+### #13 — Unbalanced evaluation batches deadlock FSDP
+- **Status:** resolved, 2026-11-08
+- **Symptom:** after making the evaluation set a fixed global size (#8), the FSDP validation test
+  **hung**, and both ranks were killed by the harness timeout after 180 s. DDP and TP passed.
+- **Cause:** distributing `eval_steps = 5` global batches over 2 ranks gives one rank 3 batches and
+  the other 2. Under FSDP the **forward itself contains collectives** (the per-unit all-gather),
+  so the rank with fewer batches left the loop and the other blocked forever in an all-gather with
+  no peer. DDP was fine because a `no_grad` forward has no collective, and TP was fine because
+  `dp_world_size` is 1 there so every rank ran every batch.
+- **Fix:** every rank runs `ceil(eval_steps / dp_world_size)` forward passes, and the surplus ones
+  are computed and weighted **zero**. The collectives stay balanced and the arithmetic is still a
+  mean over exactly batches 0..eval_steps-1.
+- **Lesson:** under FSDP (or any strategy whose forward communicates), the *number of forward
+  passes* is part of the contract between ranks, not just the data. Any per-rank loop bound must be
+  rank-independent. The hard timeout in the test harness is what turned a hang into a diagnosable
+  failure within three minutes -- the ISSUES #1 discipline paying for itself.
+
+### #8 — Validation loss was not comparable across world sizes
+- **Status:** resolved, 2026-11-08 (Milestone 6)
+- **Symptom:** `eval_steps` counted batches *per rank*, so a 2-rank run evaluated twice the data
+  and reported a different number (10.8641 vs 10.8636 on the tiny preset). Training loss was
+  exactly comparable; validation was not -- useless for precisely the cross-strategy comparison
+  this project exists to make.
+- **Fix:** `eval_steps` now counts **global** evaluation batches. The validation stream is
+  unsharded, so micro-batch *j* is the same samples on every rank; rank *r* handles
+  `j = r, r + dp, ...`; and the loss **sum** and the **count** are both all-reduced so the mean is
+  taken globally. The evaluation set is exactly `eval_steps x micro_batch_size` samples at any
+  world size, and a 1-rank run is unchanged.
+- Reducing a sum and a count rather than a mean-of-means is what makes it correct when
+  `dp_world_size` does not divide `eval_steps`: the ranks then evaluate different numbers of
+  batches, and averaging their means would weight the short rank too heavily -- the unequal-shard
+  trap of D24, one level up. Fixing this also exposed #13.
 
 ### #12 — `clip_grad_norm_` computes a rank-local norm under tensor parallelism
 - **Status:** resolved, 2026-11-08
@@ -427,3 +460,60 @@ the `g` all-reduce. Adding it before would include it once per rank, i.e. `tp_si
 This asymmetry is the single easiest thing to get wrong in a TP implementation, so it gets a direct
 test (the bias is a full copy and its gradient matches the reference in full, not as a slice) plus
 two mutations (bias added before the reduction; bias split instead of replicated).
+
+### D27 — Functional regressions are assertions; performance regressions are warnings
+Two different mechanisms, deliberately kept apart:
+
+- **`tests/regression/`** asserts *functional* invariants hard: golden loss trajectories, golden
+  gradient norms, exact preset parameter counts, state-dict key sets, and that every config in the
+  repo still loads. Golden values are legitimate because both things they depend on are pinned --
+  `torch==2.14.1` exactly (D1) and index-deterministic data (D9) -- and the failure message says
+  to **re-record deliberately**, never to loosen the tolerance.
+- **`benchmarks/regression.py`** compares a fresh measurement against a versioned baseline in
+  `results/baselines/` and *warns* past a threshold. It is a CLI tool, not a pytest test, and
+  `--fail-on-regression` is opt-in.
+
+The reason is SCOPE.md section 8's own words: *"Avoid treating noisy performance measurements as
+deterministic unit tests."* A throughput assertion inside the suite fails on a busy laptop and
+gets deleted within a week, taking its real signal with it. Gradient norms are pinned separately
+from losses, because ISSUES #12 showed a gradient bug can leave the loss plausible for several
+steps while the norms are already wrong.
+
+### D28 — What makes a benchmark number worth recording
+The harness enforces four things, and each is the difference between a number worth keeping and a
+number worth deleting:
+
+1. **Warmup discarded** — early steps include allocator growth, kernel autotuning and lazy init.
+2. **Device synchronized at every boundary** — CUDA and MPS enqueue asynchronously, so an
+   unsynchronized clock measures Python's enqueue rate. On CUDA, `cuda.Event` additionally gives
+   device-side time.
+3. **Repeats, reported as median with min/max/IQR** — one measurement cannot distinguish a
+   regression from a busy neighbour process.
+4. **Unmeasurable fields are `null`, never 0 and never estimated** — `max_memory_allocated` is
+   CUDA-only, so on CPU and MPS the memory fields are explicitly absent, and the Markdown table
+   carries that note with it.
+
+Every record also stores the commit and the full environment, so a number is traceable to what
+produced it. `scripts/check_env.py` prints the same probe the harness records, so an environment
+report and a benchmark record cannot disagree about the machine.
+
+### D29 — Failures name the knob, not just the symptom
+A CUDA OOM's native message says how many bytes failed to allocate, which is not actionable. The
+trainer re-raises it (never swallows it -- the run must still fail) with the current
+`strategy`/`precision`/`micro_batch_size`/`grad_accum_steps`/`seq_len` and the four levers in
+increasing order of disruption: halve the micro-batch and double accumulation, switch to bf16,
+switch to FSDP, reduce the sequence length.
+
+The same standard applies throughout, and the fault-injection suite asserts the *diagnostic* text
+rather than merely that something raised: unknown config keys suggest the intended key, an invalid
+`tp_size` explains that whole attention heads are partitioned, a bad `global_batch_size` prints the
+arithmetic, and a wrong checkpoint version prints both versions.
+
+### D30 — CI runs the distributed tests, and gates on the collected count
+The 2-process gloo tests run in CI rather than being deselected: they are the project's main
+correctness evidence and need no GPU (D2). Only genuinely GPU-marked tests are skipped.
+
+CI also asserts that at least 300 tests were collected. A typo in a `-m` marker expression
+otherwise runs almost nothing and still reports success -- a green tick that means nothing is worse
+than a red one. gloo's loopback interface is `lo` on Linux and `lo0` on macOS; the test harness
+picks per platform and the workflow sets it for anything launched through torchrun directly.

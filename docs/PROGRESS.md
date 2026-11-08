@@ -6,35 +6,41 @@ checklist items, add a session-log entry, and rewrite "Next up". Scope lives in
 
 ## Current state
 
-- **Active milestone:** 4 (Tensor parallelism) **complete** — all exit criteria met except the
-  benchmarks, which are *pending NVIDIA hardware*. Next: Milestone 5 (Triton kernels), which
-  **cannot be written on this machine at all** (no CUDA/Triton, ISSUES #3).
+- **Active milestone:** 6 (Reliability engineering) **complete**. Milestones 1–4 and 6 are done;
+  **Milestone 5 (Triton) is the only one left before M7**, and it cannot be written on this machine
+  (no CUDA/Triton, ISSUES #3).
 - **Last updated:** 2026-11-08
-- **Test status:** 344 passed, 1 skipped (`pytest -q`, CPU, ~124 s), including 83 two-process gloo
-  tests. The skip needs a CUDA device without bf16 support.
+- **Test status:** 414 passed, 3 skipped (`pytest -q`, CPU, ~130 s). By suite: 259 unit, 88
+  distributed (two-process gloo), 31 numerical, 27 fault-injection, 12 regression. The skips
+  need CUDA hardware this machine does not have.
 - **Verified hardware:** Apple M4 Pro (CPU + MPS), 2-process gloo. No NVIDIA GPU verification yet.
+- **CI:** GitHub Actions runs the CPU-safe suite — the gloo tests included — on every push.
 
 ## Next up
 
-**Milestone 5 — Triton kernels.** This is the first milestone that **cannot be developed locally**:
-Triton needs an NVIDIA GPU and does not install on macOS (ISSUES #3). The reference implementation
-it is checked against already exists — `rms_norm` in `model/layers.py` was written in M1 as that
-reference — so the work splits cleanly:
+**Milestone 5 — Triton kernels**, then **Milestone 7 — final documentation**. M5 is the one
+milestone that **cannot be developed here**: Triton needs an NVIDIA GPU and does not install on
+macOS (ISSUES #3). Its reference implementation already exists — `rms_norm` in `model/layers.py`
+was written in M1 for exactly this — so the work splits:
 
-- *Possible here:* the numerical test suite against `rms_norm` (shapes, dtypes, extreme inputs,
-  float64 gradcheck), the config switch between the PyTorch and Triton paths, and the benchmark
-  harness, all written and exercised against the reference with the kernel stubbed out.
-- *Needs a GPU session:* the kernel itself, its backward, and every measurement.
+- *Possible locally:* the numerical test suite against `rms_norm` (shapes, dtypes, extreme inputs,
+  float64 gradcheck) and the config switch between the PyTorch and Triton paths, written and
+  exercised against the reference with the kernel absent.
+- *Needs a GPU session:* the kernel, its backward, and every measurement.
 
-Given that, Milestone 6 (reliability: regression suite, failure injection, CI) is the better next
-target if no GPU session is booked — it is fully local, and it is where ISSUES #8 (pinning the
-evaluation set so validation loss is comparable across world sizes) belongs.
+**One GPU session now closes almost everything outstanding.** The benchmark harness, the config
+sweep and the baseline store are all in place, so a 2-GPU box needs only to run
+`python -m minimegatron.benchmarks.run` a handful of times:
 
-Still open from earlier milestones and worth folding into whichever comes next:
-- Every benchmark table is *pending hardware*: M2's 1-vs-2-rank throughput, M3's peak memory and
-  FP32-vs-BF16, M4's TP-vs-DDP-vs-FSDP. One 2-GPU session covers nearly all of them; bf16 needs
-  Ampere or newer, so a T4 will not do.
-- A model-parallel RNG tracker, which is what dropout under TP needs (D18).
+| Pending measurement | Needs |
+|---|---|
+| 1 vs 2 GPU throughput (M2) | 2 NVIDIA GPUs |
+| Peak memory per rank, DDP vs FSDP (M3) | 2 NVIDIA GPUs (`max_memory_allocated` is CUDA-only) |
+| FP32 vs BF16 (M3) | **Ampere or newer** — a T4 is sm_75 and has no bf16 at all |
+| TP vs DDP vs FSDP (M4) | 2 NVIDIA GPUs, ideally with and without NVLink |
+| Triton kernel vs reference (M5) | 1 NVIDIA GPU |
+
+Also still open: a model-parallel RNG tracker, which is what dropout under TP needs (D18).
 
 ## Milestone checklist
 
@@ -95,11 +101,17 @@ Still open from earlier milestones and worth folding into whichever comes next:
 - [ ] Numerical + gradient tests across shapes/dtypes
 - [ ] Kernel benchmarks, config switch, end-to-end integration
 
-### Milestone 6 — Reliability engineering
-- [ ] Numerical regression suite
-- [ ] Failure injection (OOM, bad config, corrupt checkpoint, missing data, worker death)
-- [ ] Automated benchmarks with regression thresholds
-- [ ] CI (GitHub Actions) running CPU-safe tests
+### Milestone 6 — Reliability engineering ✅
+- [x] Milestone scoped ([M6_reliability.md](milestones/M6_reliability.md))
+- [x] Validation loss comparable across world sizes (ISSUES #8 closed; exposed #13)
+- [x] Benchmark harness: warmup, repeats, median + dispersion, JSON *and* Markdown (D28)
+- [x] Numerical regression suite: golden losses, gradient norms, param counts, state-dict keys
+- [x] Performance regression tool with a versioned baseline store, warning not asserting (D27)
+- [x] Failure injection (OOM, bad config, invalid `tp_size`, corrupt checkpoint, missing files,
+      unsupported hardware, **worker death mid-run**)
+- [x] Actionable diagnostics, asserted as text rather than just "it raised" (D29)
+- [x] CI (GitHub Actions) running CPU-safe tests, gated on the collected test count (D30)
+- [x] The CLI documented in SCOPE.md §10 now exists (`configs/{benchmark,ddp_2gpu,fsdp_2gpu,tp_2gpu}.yaml`)
 
 ### Milestone 7 — Final documentation
 - [ ] architecture.md, distributed_training.md, testing.md, benchmarks.md
@@ -107,12 +119,35 @@ Still open from earlier milestones and worth folding into whichever comes next:
 
 ## Measured results
 
-**No throughput numbers recorded**, deliberately. The loop prints `tokens_per_sec`, but short runs
-include warmup and have no repeats or variance, and more importantly a 2-rank gloo run on one CPU
-is *slower* than one process — it adds communication and buys no parallelism, so a local
-measurement would be actively misleading rather than merely imprecise. The benchmark harness is
-Milestone 6; the 1-vs-2-GPU comparison needs two NVIDIA GPUs (Kaggle's free `T4 x2` is the planned
-venue).
+### CPU throughput (measured, Milestone 6)
+
+First recorded numbers. tiny preset, Apple M4 Pro **CPU**, commit `7b8313e`, 3 warmup steps
+discarded, 3 repeats of 10 steps, median reported with IQR. Produced by
+`python -m minimegatron.benchmarks.run`.
+
+| Label | Strategy | Precision | Ranks | Batch | tokens/s (median) | IQR | ms/step |
+|---|---|---|---|---|---|---|---|
+| tiny-cpu-fp32 | single | fp32 | 1 | 8 | **18,166.7** | 389.8 | 112.73 |
+| tiny-cpu-bf16 | single | bf16 | 1 | 8 | **151.4** | 0.7 | 13,523.86 |
+| tiny-cpu-ddp2 | ddp | fp32 | 2 | 16 | **9,811.2** | 26.0 | 417.48 |
+| tiny-cpu-fsdp2 | fsdp | fp32 | 2 | 16 | **8,673.3** | 448.9 | 472.25 |
+| tiny-cpu-tp2 | tp | fp32 | 2 | 16 | **5,175.2** | 1,030.6 | 791.47 |
+
+**Read these as relative overhead, not as scaling.** Two ranks on one CPU contend for the same
+cores *and* add communication, so a 2-rank row being slower than the 1-rank row says nothing about
+what two GPUs would do. What the table does show is the **ordering** — single > DDP > FSDP > TP —
+which matches the prediction recorded in each milestone's design doc *before* measuring: FSDP adds
+gathers and a reduce-scatter on top of DDP's single all-reduce, and TP all-reduces twice per block
+per direction, so TP is expected to be last without NVLink-class bandwidth.
+
+The bf16 row is a real measurement of **emulated** bf16 on Apple silicon (~120x slower) and
+implies nothing about bf16 on a GPU, where it is a speedup. GPU memory is absent from the table
+because `torch.cuda.max_memory_allocated` is CUDA-only; it is recorded as `null`, never estimated.
+
+### Still pending hardware
+
+Everything in the "Next up" table. The harness, the strategy configs and the baseline store are in
+place, so these are a handful of commands on a 2-GPU box rather than new work.
 
 **Correctness results**, which are the milestones' actual claims. tiny preset, CPU, 4 steps,
 global batch 16 in every row:
@@ -158,6 +193,85 @@ produced them.
 ## Session log
 
 Newest first.
+
+### 2026-11-08 — M6: reliability engineering (complete)
+
+Whole-milestone pass, scoped first in
+[milestones/M6_reliability.md](milestones/M6_reliability.md). The first milestone since M1 with no
+part blocked on hardware.
+
+**Built.**
+- **ISSUES #8 closed.** `eval_steps` now counts *global* evaluation batches over an unsharded
+  validation stream, with the loss **sum** and the **count** both reduced. The evaluation set is
+  exactly `eval_steps x micro_batch_size` samples at any world size, so validation loss is finally
+  comparable across strategies.
+- **Benchmark harness** (`benchmarks/{config,harness,run,regression}.py`): discards warmup,
+  synchronizes at every boundary, repeats and reports median with min/max/IQR, uses CUDA events on
+  CUDA, records the commit and full environment, and emits JSON *and* Markdown (D28).
+  `scripts/check_env.py` now prints the same probe the harness records.
+- **Regression suite** (`tests/regression/`): golden loss trajectory, golden gradient norms, golden
+  LR schedule, exact preset parameter counts, state-dict key sets, and that every config in the
+  repo still loads. Gradient norms are pinned *separately* from losses, because ISSUES #12 showed
+  a gradient bug can leave the loss plausible while the norms are already wrong.
+- **Performance regressions are warnings**, compared against versioned baselines in
+  `results/baselines/` by a CLI tool, never asserted in pytest (D27).
+- **Failure injection** (`tests/fault_injection/`, 27 tests) covering every case SCOPE.md §8 names,
+  each asserting the *diagnostic text* rather than just that something raised (D29) — including a
+  real `torchrun` job whose rank 1 dies via `os._exit` while rank 0 sits in an all-reduce.
+- **OOM diagnostics**: the trainer re-raises a CUDA OOM (never swallows it) with the current
+  settings and the four levers in order of disruption.
+- **CI** (`.github/workflows/ci.yml`): CPU-only torch, the gloo tests included, gated on collecting
+  at least 300 tests so a broken marker filter cannot pass silently (D30).
+- **The documented CLI now exists**: `configs/{benchmark,ddp_2gpu,fsdp_2gpu,tp_2gpu}.yaml`, which
+  SCOPE.md §10 had been describing without them being real.
+
+**Results: 414 passed, 3 skipped** (`pytest -q`, CPU, ~130 s), up from 344. **First recorded
+performance numbers** are in "Measured results" above — CPU only, and labelled as relative
+overhead rather than scaling, because two ranks on one CPU contend for the same cores.
+
+**Mutation check** — 12 injected, **12 caught** (one needed correcting first):
+
+| Mutation | Caught |
+|---|---|
+| eval: shard the validation stream again | 1 |
+| eval: unbalanced forward passes (the #13 deadlock) | 1 |
+| eval: average per-rank means instead of sum/count | 1 |
+| benchmark: do not discard warmup | 1 |
+| benchmark: report peak memory as 0 instead of None | 1 |
+| benchmark: single sample, no dispersion | 1 |
+| benchmark: ignore grad accumulation in tokens/step | 1 |
+| regression: treat higher latency as an improvement | 1 |
+| regression: compare unmeasurable metrics as zero | 1 |
+| OOM: swallow the error instead of re-raising | 1 |
+| OOM: remove the advice lines | 1 *(0 on the first attempt — see below)* |
+| strategy: allow tp on a single rank | 1 |
+
+**Four things found:**
+- **A deadlock, immediately** (ISSUES #13). Making the evaluation set a fixed global size left one
+  rank with 3 batches and the other with 2 — and under FSDP the *forward itself* contains
+  collectives, so the short rank left the loop and the other blocked forever in an all-gather.
+  DDP and TP passed, which is what made it interesting: a `no_grad` DDP forward has no collective,
+  and TP's `dp_world_size` is 1. Fixed by running `ceil(eval_steps / dp)` passes on every rank with
+  the surplus weighted zero. **The number of forward passes is part of the contract between
+  ranks, not just the data.** The harness's hard timeout turned the hang into a diagnosable
+  failure in three minutes.
+- **`strategy: tp` on a single rank was never rejected** — the needs-peers guard listed only `ddp`
+  and `fsdp`, so TP fell through to `init_device_mesh` and died with a torch error about an unset
+  `RANK`. Found by a fault-injection test written to check the *diagnostic*, which is exactly what
+  that suite is for.
+- **Loss at init is below ln(V) when the targets are the inputs** (ISSUES #14): 4.46 against 4.85.
+  With tied embeddings, "predict the token at this position" is already easy at initialization,
+  because the residual stream carries `tok_emb(x[t])` and the tied head scores it highly. A real
+  property of weight tying, and a reminder that a loss-at-init check needs independent targets.
+- **One mutation survived and was wrong, not revealing.** It deleted the header line of the OOM
+  advice rather than the advice, which the test does not assert (and need not). Re-run with the
+  advice actually removed, it was caught. Second time in the project that a surviving mutation
+  turned out to be a bad mutation — worth checking that before concluding there is a test gap.
+
+Also obsoleted one M2 test by design: `test_validation_loss_is_aggregated_across_ranks` asserted
+that each rank's eval loss *differed*, which was true only because the validation stream used to be
+sharded. Rewritten to assert the new, stronger invariant — each rank handles a different subset of
+the global batches, and the reported number is the mean over their union, identical everywhere.
 
 ### 2026-11-08 — M4: tensor parallelism (complete, benchmarks pending hardware)
 

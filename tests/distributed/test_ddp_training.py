@@ -53,32 +53,49 @@ def test_both_ranks_report_the_same_loss(tmp_path):
 
 
 def _eval_losses(rank, world_size, out_dir):
-    """The aggregated validation loss, next to this rank's unaggregated one."""
+    """This rank's strided share, the global mean computed locally, and what evaluate() reports."""
     import torch
 
     info = init_distributed(DistributedConfig(backend="gloo"))
-    cfg = nano_experiment(out_dir, eval_steps=2)
+    eval_steps = 2
+    cfg = nano_experiment(out_dir, eval_steps=eval_steps)
     trainer = Trainer(cfg, dist_info=info, out_dir=out_dir, echo=False)
 
-    trainer.raw_model.eval()
-    with torch.no_grad():
-        total = sum(
-            trainer.raw_model(*(t.to(trainer.device) for t in trainer.val_stream.micro_batch(j)))[1]
-            for j in range(cfg.train.eval_steps)
-        )
-    local = (total / cfg.train.eval_steps).item()
-    trainer.raw_model.train()
+    def mean_over(indices):
+        trainer.raw_model.eval()
+        with torch.no_grad():
+            total = sum(
+                trainer.raw_model(
+                    *(t.to(trainer.device) for t in trainer.val_stream.micro_batch(j))
+                )[1]
+                for j in indices
+            )
+        trainer.raw_model.train()
+        return (total / len(indices)).item()
 
-    return {"aggregated": trainer.evaluate(), "local": local}
+    return {
+        "own_share": mean_over(range(trainer.dp_rank, eval_steps, trainer.dp_world_size)),
+        "global_mean": mean_over(range(eval_steps)),
+        "reported": trainer.evaluate(),
+    }
 
 
 def test_validation_loss_is_aggregated_across_ranks(tmp_path):
-    """Each rank evaluates its own shard, so an unaggregated number describes only that shard."""
+    """Each rank evaluates a different *subset* of the global evaluation batches, and the reported
+    number is the mean over their union -- identical on every rank.
+
+    Since the ISSUES #8 fix the validation *stream* is no longer sharded: `eval_steps` counts
+    global batches and `evaluate()` distributes those batches across ranks. So the thing that
+    differs per rank is which batch indices it handles, not which samples its stream yields.
+    """
     results = run_distributed(_eval_losses, 2, args=(str(tmp_path / "ddp"),))
 
-    # The shards genuinely differ, so this test has teeth.
-    assert results[0]["local"] != pytest.approx(results[1]["local"])
-    # ...and the reported value is the mean over the union, identical on every rank.
-    expected = (results[0]["local"] + results[1]["local"]) / 2
+    # The shares genuinely differ (rank 0 takes batch 0, rank 1 takes batch 1), so the
+    # aggregation is doing real work rather than averaging identical numbers.
+    assert results[0]["own_share"] != pytest.approx(results[1]["own_share"])
+
     for rank in (0, 1):
-        assert results[rank]["aggregated"] == pytest.approx(expected, rel=1e-6)
+        assert results[rank]["reported"] == pytest.approx(
+            results[rank]["global_mean"], rel=1e-6
+        )
+    assert results[0]["reported"] == pytest.approx(results[1]["reported"], rel=1e-9)
