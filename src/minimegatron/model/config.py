@@ -8,6 +8,9 @@ from minimegatron.config import ConfigError
 
 ATTENTION_BACKENDS = ("reference", "sdpa")
 NORM_TYPES = ("layernorm", "rmsnorm")
+# Which *implementation* of RMSNorm, not which maths -- the same kind of switch as
+# attention_backend. See kernels/rmsnorm.py and docs/milestones/M5_triton.md.
+NORM_BACKENDS = ("auto", "pytorch", "triton")
 # Parameter *storage* is always float32. Mixed precision is a compute setting; see
 # `TrainConfig.precision`, which runs the forward/backward in bf16 over fp32 master weights.
 SUPPORTED_DTYPES = ("float32",)
@@ -37,6 +40,7 @@ class ModelConfig:
     tie_embeddings: bool = True  # LM head reuses the token-embedding matrix
     attention_backend: str = "reference"
     norm_type: str = "layernorm"
+    norm_backend: str = "auto"  # RMSNorm implementation; ignored by LayerNorm
     dtype: str = "float32"  # parameter storage dtype
 
     def __post_init__(self) -> None:
@@ -69,6 +73,17 @@ class ModelConfig:
             )
         if self.norm_type not in NORM_TYPES:
             errors.append(f"norm_type must be one of {NORM_TYPES}, got {self.norm_type!r}")
+        if self.norm_backend not in NORM_BACKENDS:
+            errors.append(
+                f"norm_backend must be one of {NORM_BACKENDS}, got {self.norm_backend!r}"
+            )
+        elif self.norm_backend == "triton" and self.norm_type == "layernorm":
+            # Rejected rather than ignored: a config that asks for a kernel it will never reach
+            # is a config whose author believes something false.
+            errors.append(
+                "norm_backend 'triton' only applies to norm_type 'rmsnorm'; there is no Triton "
+                "LayerNorm in this project (set norm_type: rmsnorm, or norm_backend: auto)"
+            )
         if self.dtype == "bfloat16":
             errors.append(
                 "dtype is parameter storage and is always 'float32'; for bf16 compute set "

@@ -6,39 +6,41 @@ checklist items, add a session-log entry, and rewrite "Next up". Scope lives in
 
 ## Current state
 
-- **Active milestone:** 6 (Reliability engineering) **complete**. Milestones 1–4 and 6 are done;
-  **Milestone 5 (Triton) is the only one left before M7**, and it cannot be written on this machine
-  (no CUDA/Triton, ISSUES #3).
+- **Active milestone:** 5 (Triton kernels) **as complete as this machine allows**. Milestones 1–4
+  and 6 are done. M5's reference, test suite, dispatch, fallback and benchmark CLI are finished and
+  tested; **the Triton kernel itself is written but has never been executed** (ISSUES #16).
+  Next: Milestone 7 (final documentation).
 - **Last updated:** 2026-11-08
-- **Test status:** 414 passed, 3 skipped (`pytest -q`, CPU, ~130 s). By suite: 259 unit, 88
-  distributed (two-process gloo), 31 numerical, 27 fault-injection, 12 regression. The skips
-  need CUDA hardware this machine does not have.
+- **Test status:** 455 passed, 37 skipped (`pytest -q`, CPU, ~126 s). By suite: 261 unit, 88
+  distributed (two-process gloo), 73 kernels, 31 numerical, 27 fault-injection, 12 regression.
+  All 37 skips need CUDA hardware; 34 of them are the Triton-parameterized kernel tests
+  (ISSUES #16).
 - **Verified hardware:** Apple M4 Pro (CPU + MPS), 2-process gloo. No NVIDIA GPU verification yet.
 - **CI:** GitHub Actions runs the CPU-safe suite — the gloo tests included — on every push.
 
 ## Next up
 
-**Milestone 5 — Triton kernels**, then **Milestone 7 — final documentation**. M5 is the one
-milestone that **cannot be developed here**: Triton needs an NVIDIA GPU and does not install on
-macOS (ISSUES #3). Its reference implementation already exists — `rms_norm` in `model/layers.py`
-was written in M1 for exactly this — so the work splits:
+**Milestone 7 — final documentation.** `architecture.md`, `distributed_training.md`, `testing.md`,
+`benchmarks.md`, plus reproducible experiment instructions and the measured-results tables. Most of
+the substance already exists in the milestone docs, `docs/fsdp.md` and `docs/tensor_parallel.md`;
+M7 is largely organising it into the four documents SCOPE.md asks for and filling the results
+tables with whatever has actually been measured by then.
 
-- *Possible locally:* the numerical test suite against `rms_norm` (shapes, dtypes, extreme inputs,
-  float64 gradcheck) and the config switch between the PyTorch and Triton paths, written and
-  exercised against the reference with the kernel absent.
-- *Needs a GPU session:* the kernel, its backward, and every measurement.
+**One GPU session closes everything else.** Nothing below is new work — the harness, the strategy
+configs, the baseline store and the backend-parameterized kernel tests are all in place:
 
-**One GPU session now closes almost everything outstanding.** The benchmark harness, the config
-sweep and the baseline store are all in place, so a 2-GPU box needs only to run
-`python -m minimegatron.benchmarks.run` a handful of times:
+| Pending | Command | Needs |
+|---|---|---|
+| Triton kernel correctness (M5, ISSUES #16) | `pytest tests/kernels -q` | 1 NVIDIA GPU |
+| Triton vs reference runtime/bandwidth (M5) | `python -m minimegatron.benchmarks.kernels` | 1 NVIDIA GPU |
+| 1 vs 2 GPU throughput (M2) | `benchmarks.run` ×2 | 2 NVIDIA GPUs |
+| Peak memory, DDP vs FSDP (M3) | `benchmarks.run` with `strategy` overrides | 2 NVIDIA GPUs |
+| FP32 vs BF16 (M3) | `--set train.precision=bf16` | **Ampere+** (a T4 is sm_75, no bf16) |
+| TP vs DDP vs FSDP (M4) | `benchmarks.run` ×3 | 2 GPUs, ideally ± NVLink |
 
-| Pending measurement | Needs |
-|---|---|
-| 1 vs 2 GPU throughput (M2) | 2 NVIDIA GPUs |
-| Peak memory per rank, DDP vs FSDP (M3) | 2 NVIDIA GPUs (`max_memory_allocated` is CUDA-only) |
-| FP32 vs BF16 (M3) | **Ampere or newer** — a T4 is sm_75 and has no bf16 at all |
-| TP vs DDP vs FSDP (M4) | 2 NVIDIA GPUs, ideally with and without NVLink |
-| Triton kernel vs reference (M5) | 1 NVIDIA GPU |
+Expect the kernel's first real run to surface bugs; that is the normal outcome for code written
+without ever executing it, and the test suite is arranged so those bugs land as test failures
+rather than as silently wrong training.
 
 Also still open: a model-parallel RNG tracker, which is what dropout under TP needs (D18).
 
@@ -96,10 +98,18 @@ Also still open: a model-parallel RNG tracker, which is what dropout under TP ne
 - [x] [`docs/tensor_parallel.md`](../docs/tensor_parallel.md)
 - [ ] TP vs DDP vs FSDP benchmarks *(pending hardware)*
 
-### Milestone 5 — Triton kernels *(requires NVIDIA GPU)*
-- [ ] RMSNorm reference + Triton forward/backward
-- [ ] Numerical + gradient tests across shapes/dtypes
-- [ ] Kernel benchmarks, config switch, end-to-end integration
+### Milestone 5 — Triton kernels *(partial: kernel unverified, ISSUES #16)*
+- [x] Milestone scoped ([M5_triton.md](milestones/M5_triton.md))
+- [x] RMSNorm PyTorch reference (written in M1 for exactly this)
+- [x] Triton forward kernel + `dx` backward kernel — **written, NEVER EXECUTED**
+- [x] Explicit autograd strategy: Triton `dx`, PyTorch `dw`, documented as a decision (D31)
+- [x] Numerical + gradient tests across shapes/dtypes/extremes, parameterized over backend —
+      the reference passes; the 34 Triton parameters skip, stating why
+- [x] float64 `gradcheck` of the reference
+- [x] Config switch `model.norm_backend: auto|pytorch|triton` with no silent fallback (D32)
+- [x] Kernel benchmark CLI (`benchmarks.kernels`), which refuses clearly without a GPU
+- [ ] Triton numerical equivalence vs the reference *(pending hardware)*
+- [ ] Kernel runtime/bandwidth measurements *(pending hardware)*
 
 ### Milestone 6 — Reliability engineering ✅
 - [x] Milestone scoped ([M6_reliability.md](milestones/M6_reliability.md))
@@ -193,6 +203,76 @@ produced them.
 ## Session log
 
 Newest first.
+
+### 2026-11-08 — M5: Triton RMSNorm (kernel written but UNVERIFIED)
+
+Scoped in [milestones/M5_triton.md](milestones/M5_triton.md), which states the constraint before
+anything else: **Triton needs an NVIDIA GPU and has no macOS wheels (ISSUES #3)**, so the kernel
+cannot be run here. The milestone therefore delivers everything *around* the kernel and records the
+kernel as unverified code (ISSUES #16). Nothing in this project claims it works.
+
+**Built.**
+- `kernels/rmsnorm.py`: a fused forward kernel (one program per row, `BLOCK` = next power of two
+  with a mask, fp32 accumulation) and a `dx` backward kernel. Triton is imported under a guard and
+  the kernels are defined inside it, so the module imports fine without Triton.
+- **Explicit autograd strategy** rather than a full Triton backward (D31): Triton for `dx`, PyTorch
+  for `dw`. `dw` is a cross-row reduction needing atomics or locks — the most error-prone code in
+  the kernel for the least benefit, and a decisively bad trade when it cannot be tested here.
+  SCOPE.md §7 permits exactly this ("a valid backward implementation *or* an explicit supported
+  autograd strategy").
+- `model.norm_backend: auto|pytorch|triton` (D32), mirroring the existing `attention_backend`.
+  Explicit `triton` is a hard error without Triton/CUDA, and fails at *construction*. `auto` is the
+  only silent fallback in the project, defensible solely because the two paths are asserted
+  equivalent — and it is resolved **once**, not per forward, since re-resolving would put a
+  `torch.cuda.is_available()` call in a hot path.
+- `tests/kernels/test_rmsnorm.py`: 73 tests parameterized over backend, so the kernel will be
+  judged by the reference's own assertions with no new test code. 8 shapes (including
+  non-powers-of-two 192, 193, 33), 3 dtypes with dtype-appropriate tolerances, extreme magnitudes,
+  all-zero rows, single-element rows, mixed magnitudes, a float64 `gradcheck`, and the unit-RMS
+  property.
+- `benchmarks/kernels.py`: reference vs Triton across 6 shapes, reporting runtime and achieved
+  bandwidth, since RMSNorm is memory-bound and bandwidth is the honest headline. Exits 2 with a
+  clear explanation without a GPU.
+
+**Results: 455 passed, 37 skipped** (`pytest -q`, CPU, ~126 s), up from 452. **34 of the skips are
+the Triton parameters**, each stating the reason. The reference is fully verified; the kernel has
+executed zero times.
+
+**Mutation check** — 10 injected, 10 caught, but **two needed real fixes first**:
+
+| Mutation | Caught |
+|---|---|
+| resolve: explicit triton falls back silently | 1 |
+| resolve: auto errors instead of falling back | 1 |
+| resolve: accept any backend string | 1 |
+| module: do not resolve the backend at construction | 1 |
+| config: allow norm_backend triton with layernorm | 1 |
+| config: accept any norm_backend value | 1 *(0 first — real gap)* |
+| reference: drop eps entirely | 1 |
+| reference: add eps outside the square root | 1 |
+| reference: downcast instead of promote (ISSUES #4 regression) | 1 |
+| make_norm: ignore the configured backend | 1 *(0 first — vacuous test)* |
+
+**Three things found:**
+- **A test of mine was vacuous.** `test_make_norm_passes_the_configured_backend` asserted the
+  *resolved* backend was `pytorch` — true on this machine whether or not the config was read at
+  all, so a mutation that ignored `cfg.norm_backend` entirely passed. It now asserts the
+  **requested** backend propagates, which is the part that distinguishes them. A test that cannot
+  fail on the machine it runs on is not a test.
+- **`ModelConfig.norm_backend`'s value validation was untested** — `test_config.py`'s
+  invalid-values list never got a case, and the kernels test exercised `resolve_norm_backend`
+  directly instead. Both now covered.
+- **`eps` is not negligible at small activation scales** (ISSUES #15). A test asserted a constant
+  row of 0.01 normalizes to exactly 1.0 and measured 0.954. With `mean(x²) ≈ 1e-4` against
+  `eps = 1e-5`, 0.954 is *correct*. The mistake became a better test: it now compares against the
+  exact float64 formula including eps and asserts the output is below 0.97, so a kernel that
+  dropped eps or put it outside the square root fails there and nowhere else. Two of the ten
+  mutations exist because of it.
+
+**What closing ISSUES #16 takes:** `pytest tests/kernels -q` on a Linux + NVIDIA box, then
+`python -m minimegatron.benchmarks.kernels`. Expect the first run to surface real bugs — that is
+the normal outcome for a kernel written without ever executing it, and the suite is arranged so
+they land as test failures rather than as silently wrong training.
 
 ### 2026-11-08 — M6: reliability engineering (complete)
 

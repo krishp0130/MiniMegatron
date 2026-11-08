@@ -6,6 +6,22 @@ the fix rather than deleting them.
 
 ## Open issues
 
+### #16 — The Triton RMSNorm kernel has NEVER BEEN EXECUTED
+- **Status:** open (blocked on hardware)
+- **Detail:** `kernels/rmsnorm.py` contains a fused forward kernel and a `dx` backward kernel
+  written for Triton. **Neither has ever run.** There is no NVIDIA GPU on this machine and Triton
+  has no macOS wheels (#3), so the code has been type-checked by nothing stronger than reading it.
+  It is unverified code, not working code, and no document in this project may say otherwise.
+- **What *is* verified:** the PyTorch reference (`rms_norm`, written in M1 for this purpose) across
+  8 shapes, 3 dtypes, extreme inputs and a float64 gradcheck; the eps handling; the backend
+  dispatch and fallback; and that an explicit `norm_backend: triton` fails fast here rather than
+  falling back silently. 34 Triton-parameterized tests exist and **skip**, stating the reason.
+- **To close:** run `pytest tests/kernels -q` on a Linux + NVIDIA machine. The tests are
+  parameterized over backend, so the kernel is judged by the reference's own assertions with no
+  new test code. Then `python -m minimegatron.benchmarks.kernels` for the runtime and bandwidth
+  comparison. Expect the first run to surface real bugs; that is the normal outcome for a kernel
+  written blind.
+
 ### #3 — No NVIDIA GPU on the development machine
 - **Status:** open (environmental)
 - **Impact:** CUDA, NCCL, BF16-on-GPU, Triton (Milestone 5), and every GPU benchmark cannot be run
@@ -32,6 +48,20 @@ the fix rather than deleting them.
   verify a precision mode by the dtype at each op, never by whether the loss changed.
 
 ## Resolved issues
+
+### #15 — `eps` is not negligible at small activation scales
+- **Status:** resolved (test-design rule), 2026-11-08
+- **Symptom:** a kernel test asserted that a constant row normalizes to exactly 1.0 and measured
+  0.954 instead — a 4.7% discrepancy that looked like a precision bug.
+- **Cause:** the row's value was 0.01, so `mean(x²) ≈ 1e-4`, only ten times `eps = 1e-5`. With eps
+  inside the square root — where it belongs — the correct answer *is* 0.954. The test's premise
+  that eps could be ignored was simply false at that scale.
+- **Fix:** the test now compares against the full float64 formula *including* eps, and additionally
+  asserts the output is below 0.97 — so it fails if eps is dropped or moved outside the square
+  root. A mistake in a test turned into a test that pins something real: a kernel that omitted eps
+  would pass every well-scaled case and fail only here.
+- **Lesson:** when a normalization test uses small activations, eps is part of the expected value,
+  not a rounding detail. Compare against the exact formula rather than an idealized limit.
 
 ### #14 — Loss at init is *below* ln(V) when the targets are the inputs
 - **Status:** resolved (test-design rule), 2026-11-08
@@ -517,3 +547,50 @@ CI also asserts that at least 300 tests were collected. A typo in a `-m` marker 
 otherwise runs almost nothing and still reports success -- a green tick that means nothing is worse
 than a red one. gloo's loopback interface is `lo` on Linux and `lo0` on macOS; the test harness
 picks per platform and the workflow sets it for anything launched through torchrun directly.
+
+### D31 — Triton for `dx`, PyTorch for `dw`
+RMSNorm's backward splits into two unlike halves:
+
+```
+dL/dx_i = r·w_i·dy_i − (r³·x_i / N) · Σⱼ(dyⱼ·wⱼ·xⱼ)
+dL/dw_i = Σ_rows (dy_i · x_i · r)
+```
+
+`dx` is per-row with an in-row reduction, which is exactly what fuses well — one program per row,
+one pass over memory. `dw` is a reduction **across rows**, which in Triton needs either atomics or
+a two-stage partial buffer with locks.
+
+SCOPE.md section 7 permits "a valid backward implementation **or an explicit supported autograd
+strategy**", and this takes the second option deliberately: `dw` is computed as
+`(dy * x * r).sum(0)` in PyTorch, a single well-optimized reduction with nothing to fuse away.
+
+The reasoning is risk against benefit. The fused win lives in `dx`; a lock-based `dw` accumulator
+would be the most error-prone code in the kernel for the smallest gain — and that calculus is
+decisively worse when the code **cannot be executed or tested on the development machine** (#16).
+Writing the riskiest possible code blind is not a trade worth making. If a GPU benchmark later
+shows `dw` dominating, it can be fused then, with a working test suite to catch the mistakes.
+
+### D32 — `norm_backend`: one place where a silent fallback is allowed
+`model.norm_backend` mirrors the existing `attention_backend` switch, since both choose an
+*implementation* rather than the maths:
+
+- **`pytorch`** — always the reference.
+- **`triton`** — a hard error if Triton or CUDA is missing, and a hard error at the first forward
+  if the tensors are not on CUDA. The same rule as `device` and `precision` (D29 and the no-silent-
+  fallback principle): a run that quietly used a different code path than its config says is worse
+  than one that stops. It fails at *construction*, not an hour into training.
+- **`auto`** — Triton on CUDA when importable, else the reference.
+
+`auto` is the only silent fallback anywhere in this project, and it is defensible for exactly one
+reason: the two paths are asserted numerically equivalent by the same test suite. **If that
+assertion ever stops holding, `auto` becomes a liability and should be removed rather than
+patched.** Until the kernel has actually run (#16), `auto` resolves to `pytorch` everywhere it has
+been exercised.
+
+`auto` is resolved **once, at module construction**, to a concrete backend. Leaving it as `"auto"`
+would mean re-resolving — including a `torch.cuda.is_available()` call — on every forward pass of
+every norm in the model, which is a hot path.
+
+`norm_backend: triton` with `norm_type: layernorm` is rejected rather than ignored: there is no
+Triton LayerNorm here, so such a config asks for a kernel it can never reach, and its author
+believes something false.

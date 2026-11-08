@@ -75,6 +75,9 @@ def test_config_is_frozen(nano_config):
         ({"bias": 1}, "bias must be true or false"),
         ({"attention_backend": "flash"}, "attention_backend must be one of"),
         ({"norm_type": "batchnorm"}, "norm_type must be one of"),
+        ({"norm_backend": "cutlass"}, "norm_backend must be one of"),
+        # A kernel that can never be reached, because there is no Triton LayerNorm here.
+        ({"norm_backend": "triton"}, "only applies to norm_type 'rmsnorm'"),
         # dtype is parameter storage; bf16 compute is train.precision (Milestone 3).
         ({"dtype": "bfloat16"}, "train.precision: bf16"),
         ({"dtype": "float16"}, "dtype must be one of"),

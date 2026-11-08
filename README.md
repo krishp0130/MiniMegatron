@@ -18,7 +18,7 @@ harness.
 | 2. Distributed data parallel | DDP, gradient sync validation, rank-aware logging | **done** (benchmarks pending GPU) |
 | 3. Memory optimization | BF16, FSDP2, sharded checkpoints, memory measurements | **done** (memory numbers pending GPU) |
 | 4. Tensor parallelism | Megatron-style column/row-parallel MLP and attention | **done** (benchmarks pending GPU) |
-| 5. GPU kernel optimization | Triton RMSNorm, forward and backward, benchmarks | not started |
+| 5. GPU kernel optimization | Triton RMSNorm, forward and backward, benchmarks | **partial** — tests, dispatch and fallback done; **kernel written but never executed** (ISSUES #16) |
 | 6. Reliability engineering | Regression and distributed tests, failure injection, CI | **done** |
 | 7. Documentation | Architecture, experiments, results tables | not started |
 
@@ -118,6 +118,23 @@ Functional invariants are asserted hard; performance is compared against
 [`results/baselines/`](results/baselines/) and only *warns*. Unmeasurable fields (GPU memory on a
 CPU box) are recorded as `null`, never as 0 and never estimated. CI runs the CPU-safe suite,
 including the 2-process gloo tests, on every push.
+
+### Custom kernels
+
+```bash
+# The RMSNorm implementation is selectable. `auto` uses Triton on CUDA and the reference elsewhere.
+.venv/bin/python -m minimegatron.train --config configs/tiny.yaml \
+    --set model.norm_type=rmsnorm --set model.norm_backend=pytorch
+
+# Kernel-level comparison (needs Triton + an NVIDIA GPU; refuses clearly otherwise).
+.venv/bin/python -m minimegatron.benchmarks.kernels
+```
+
+> **The Triton kernel has never been executed.** It is written, but there is no NVIDIA GPU on the
+> development machine and Triton has no macOS wheels, so it is *unverified code*. The PyTorch
+> reference, the test suite that will judge the kernel, and the backend dispatch are all tested;
+> the 34 Triton-parameterized tests skip. See [ISSUES #16](docs/ISSUES.md) for what closing it
+> requires. An explicit `norm_backend: triton` fails fast rather than falling back silently.
 
 ## Hardware support
 
