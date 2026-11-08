@@ -14,6 +14,7 @@ from typing import Any
 import yaml
 
 from minimegatron.config import ConfigError, load_yaml
+from minimegatron.distributed.setup import destroy_distributed, init_distributed
 from minimegatron.experiment import config_from_dict
 from minimegatron.training.trainer import Trainer
 
@@ -80,18 +81,30 @@ def main(argv: list[str] | None = None) -> int:
         print(f"configuration error: {e}", file=sys.stderr)
         return 2
 
-    trainer = Trainer(cfg, out_dir=args.out_dir)
-    print(
-        f"model: {trainer.model.num_params():,} parameters "
-        f"({trainer.model.num_params(include_embeddings=False):,} non-embedding) | "
-        f"device: {trainer.device} | steps: {cfg.train.max_steps}",
-        flush=True,
-    )
-    if args.resume:
-        meta = trainer.resume(args.resume)
-        print(f"resumed from {args.resume} at step {meta['step']}", flush=True)
+    # No-op without torchrun's environment, so the same entry point serves single-process and
+    # distributed runs. Teardown goes in a `finally`: a rank that exits while its peers are inside
+    # a collective leaves them blocked until the timeout, turning one failure into a hung job.
+    dist_info = init_distributed(cfg.distributed)
+    try:
+        trainer = Trainer(cfg, dist_info=dist_info, out_dir=args.out_dir, echo=dist_info.is_main)
+        if dist_info.is_main:
+            world = (
+                f" | ranks: {dist_info.world_size}" if dist_info.is_distributed else ""
+            )
+            print(
+                f"model: {trainer.raw_model.num_params():,} parameters "
+                f"({trainer.raw_model.num_params(include_embeddings=False):,} non-embedding) | "
+                f"device: {trainer.device} | steps: {cfg.train.max_steps}{world}",
+                flush=True,
+            )
+        if args.resume:
+            meta = trainer.resume(args.resume)
+            if dist_info.is_main:
+                print(f"resumed from {args.resume} at step {meta['step']}", flush=True)
 
-    trainer.fit()
+        trainer.fit()
+    finally:
+        destroy_distributed()
     return 0
 
 

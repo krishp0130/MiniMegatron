@@ -53,3 +53,28 @@ def format_record(record: dict[str, Any]) -> str:
         if key in record and record[key] is not None:
             parts.append(f"{key} " + fmt.format(record[key]))
     return " | ".join(parts)
+
+
+class NullLogger:
+    """A logger that discards everything, for non-zero ranks.
+
+    Every rank holds identical weights after the optimizer step, so `world_size` copies of the
+    same lines would be pure waste, and concurrent appends to one file interleave into unparseable
+    JSONL. Giving the other ranks a sink rather than scattering `if rank == 0` through the trainer
+    keeps the training loop readable.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self.path = None
+
+    def log(self, record: dict) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def __enter__(self) -> "NullLogger":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None

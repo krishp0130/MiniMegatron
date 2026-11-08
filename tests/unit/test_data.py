@@ -189,3 +189,62 @@ def test_build_dataset_honours_dataset_and_split(nano_config):
 def test_build_dataset_rejects_unknown_split(nano_config):
     with pytest.raises(ValueError, match="split must be"):
         build_dataset(DataConfig(), nano_config, split="test")
+
+
+# --- rank sharding (Milestone 2) ----------------------------------------------------------------
+
+
+def shards(micro: int, world_size: int, micro_index: int = 0, seed: int = 0):
+    ds = random_ds()
+    return [
+        BatchStream(ds, micro, seed, rank=r, world_size=world_size).indices(micro_index)
+        for r in range(world_size)
+    ]
+
+
+@pytest.mark.parametrize("world_size", [1, 2, 4])
+def test_ranks_together_consume_the_single_process_batch(world_size):
+    """The union over ranks of micro-batch m is the single-process batch of size micro x R.
+
+    This is what makes the DDP equivalence test exact: two ranks of 4 see precisely the samples
+    one process of 8 would, in the same order.
+    """
+    micro = 4
+    union = torch.cat(shards(micro, world_size))
+    whole = BatchStream(random_ds(), micro * world_size, 0).indices(0)
+    torch.testing.assert_close(union, whole)
+
+
+def test_ranks_never_see_the_same_sample():
+    a, b = shards(micro=4, world_size=2)
+    assert set(a.tolist()).isdisjoint(b.tolist())
+
+
+def test_every_rank_gets_the_same_number_of_samples():
+    """Unequal shards would silently reweight the averaged gradient: the mean of per-rank means
+    is only the mean over the global batch when the shards are the same size."""
+    for shard in shards(micro=4, world_size=4):
+        assert len(shard) == 4
+
+
+def test_sharding_still_covers_each_epoch_exactly_once():
+    micro, world_size = 4, 2
+    per_step = micro * world_size
+    seen = []
+    for micro_index in range(N // per_step):
+        seen += [int(i) for shard in shards(micro, world_size, micro_index) for i in shard]
+    assert sorted(seen) == list(range(N))
+
+
+def test_single_rank_sharding_is_the_milestone_1_behaviour():
+    """world_size=1 must change nothing, so the single-process path stays the reference."""
+    ds = random_ds()
+    sharded = BatchStream(ds, 4, 0, rank=0, world_size=1).indices(3)
+    plain = BatchStream(ds, 4, 0).indices(3)
+    torch.testing.assert_close(sharded, plain)
+
+
+@pytest.mark.parametrize("rank, world_size", [(2, 2), (-1, 2), (0, 0)])
+def test_invalid_rank_or_world_size_rejected(rank, world_size):
+    with pytest.raises(ValueError):
+        BatchStream(random_ds(), 4, 0, rank=rank, world_size=world_size)

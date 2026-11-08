@@ -15,7 +15,7 @@ harness.
 |---|---|---|
 | 0. Setup | Repo, environment, packaging, context docs | **done** |
 | 1. Functional GPT baseline | Model, synthetic data, single-device training, unit tests | **done** |
-| 2. Distributed data parallel | DDP, gradient sync validation, rank-aware logging | not started |
+| 2. Distributed data parallel | DDP, gradient sync validation, rank-aware logging | **done** (benchmarks pending GPU) |
 | 3. Memory optimization | BF16, FSDP2, sharded checkpoints, memory measurements | not started |
 | 4. Tensor parallelism | Megatron-style column/row-parallel MLP and attention | not started |
 | 5. GPU kernel optimization | Triton RMSNorm, forward and backward, benchmarks | not started |
@@ -39,6 +39,25 @@ Training writes JSONL metrics (`step`, `loss`, `lr`, `grad_norm`, `tokens_seen`,
 `tokens_per_sec`) and checkpoints to `train.out_dir`. `--set section.key=value` overrides any
 config value and is validated exactly as strictly as the YAML file. Resuming is bit-for-bit
 identical to an uninterrupted run on CPU, which a test asserts.
+
+### Multi-process (DDP)
+
+```bash
+# 2 ranks at the same global batch as the single-process run above: micro=8 x accum=1 x 2 = 16.
+GLOO_SOCKET_IFNAME=lo0 .venv/bin/torchrun --nnodes=1 --nproc_per_node=2 \
+    --master_addr=127.0.0.1 --master_port=29500 \
+    -m minimegatron.train --config configs/tiny.yaml --set train.grad_accum_steps=1
+
+# See the all-reduce DDP hides, done by hand:
+GLOO_SOCKET_IFNAME=lo0 .venv/bin/torchrun --nnodes=1 --nproc_per_node=2 \
+    --master_addr=127.0.0.1 --master_port=29501 \
+    -m minimegatron.distributed.collectives_demo
+```
+
+Rank 0 does all the logging and checkpointing, and checkpoints store the unwrapped model, so a
+2-rank checkpoint loads straight into a single-device run. If `global_batch_size` is declared it is
+checked against `micro_batch_size x grad_accum_steps x world_size` and the run refuses to start on
+a mismatch — to keep the global batch fixed while adding ranks, reduce `grad_accum_steps`.
 
 ## Hardware support
 

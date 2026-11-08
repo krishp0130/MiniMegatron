@@ -6,32 +6,30 @@ checklist items, add a session-log entry, and rewrite "Next up". Scope lives in
 
 ## Current state
 
-- **Active milestone:** 1 (Functional GPT baseline) **complete** — all 6 steps and all exit
-  criteria met. Next: Milestone 2 (DDP).
-- **Last updated:** 2026-11-07
-- **Test status:** 201 passed (`pytest -q`, CPU; the 2 MPS tests ran on the M4 Pro)
-- **Verified hardware:** Apple M4 Pro (CPU + MPS). No NVIDIA GPU verification yet.
+- **Active milestone:** 2 (Distributed data parallel) **complete** — all exit criteria met except
+  the throughput benchmark, which is *pending NVIDIA hardware*. Next: Milestone 3 (FSDP2).
+- **Last updated:** 2026-11-08
+- **Test status:** 241 passed (`pytest -q`, CPU, ~47 s), including 30 two-process gloo tests
+- **Verified hardware:** Apple M4 Pro (CPU + MPS), 2-process gloo. No NVIDIA GPU verification yet.
 
 ## Next up
 
-**Milestone 2 — distributed data parallel.** Scope it in `docs/milestones/M2_ddp.md` first
-(process-group lifecycle, DDP gradient synchronization, `no_sync` accumulation, rank-aware
-logging and rank-0 checkpointing, the gloo correctness test), then implement.
+**Milestone 3 — memory optimization (BF16 + FSDP2).** Scope it in `docs/milestones/M3_fsdp.md`
+first, then implement. Per CLAUDE.md this returns to the **one-step-at-a-time cadence** (the
+whole-milestone passes were authorized for M1 and M2 only).
 
-The M1 pieces M2 builds directly on:
-- `training/trainer.py` takes a `dp_world_size` argument already; it is 1 in M1 and feeds the
-  `global_batch_size` cross-check (`micro × accum × dp_world_size`).
-- `data/synthetic.py`'s `IndexStream` is defined over samples, not batches (D12), so rank
-  sharding slots in without disturbing the single-device sample order — which is what makes
-  "DDP gradients == reference global-batch gradients" a meaningful comparison.
-- `tests/unit/test_train.py::test_accumulation_matches_one_large_batch` is the single-process
-  form of exactly the equivalence the DDP test must show across ranks.
+M3 is also where the **`strategy:` switch** gets designed — deliberately deferred from M2, because
+a second strategy is what reveals where the seam belongs. What M2 leaves in place for it:
+- `Trainer` takes a `DistInfo` and keeps `raw_model` separate from the possibly-wrapped `model`,
+  so another wrapper slots in without touching clipping, checkpointing or parameter access.
+- Checkpoints already store the *unwrapped* state dict, so they stay interchangeable across
+  strategies (M3 must decide how sharded checkpoints relate to this).
+- `distributed/setup.py` owns process-group lifecycle; FSDP2 needs an **explicit** device mesh
+  built from the configured device type (`init_device_mesh("cpu", ...)`), never auto-detection,
+  which crashes on MPS (ISSUES #2).
 
-Two environment constraints to plan around (ISSUES #1, #3): gloo on macOS needs
-`GLOO_SOCKET_IFNAME=lo0` and an explicit master address, and every distributed subprocess needs a
-hard Python-side timeout. NCCL and all scaling benchmarks stay *pending hardware*.
-
-Full M1 design, for reference: [milestones/M1_gpt_baseline.md](milestones/M1_gpt_baseline.md).
+Two things M3 will have to confront: BF16 is rejected by `ModelConfig` today with a pointer to
+Milestone 3, and the tied embedding must stay in the root sharding unit (D8).
 
 ## Milestone checklist
 
@@ -55,12 +53,13 @@ Full M1 design, for reference: [milestones/M1_gpt_baseline.md](milestones/M1_gpt
 - [x] `python -m minimegatron.train --config configs/tiny.yaml` works (CPU and MPS)
 - [ ] *(stretch, deferred)* Real text data (`data/text.py`) — not required for sign-off
 
-### Milestone 2 — Distributed data parallel
-- [ ] Process-group setup/teardown (`distributed/setup.py`)
-- [ ] DDP wrapper, DistributedSampler, `no_sync` grad accumulation
-- [ ] Rank-aware logging, metric aggregation, rank-0 checkpointing
-- [ ] DDP gradients == reference global-batch gradients (gloo test)
-- [ ] Educational explicit all-reduce demo (`collectives_demo.py`)
+### Milestone 2 — Distributed data parallel ✅
+- [x] Milestone scoped ([M2_ddp.md](milestones/M2_ddp.md))
+- [x] Process-group setup/teardown (`distributed/{config,setup}.py`)
+- [x] DDP wrapper, rank sharding via `IndexStream` (D17), `no_sync` grad accumulation
+- [x] Rank-aware logging, metric aggregation, rank-0 checkpointing
+- [x] DDP gradients == reference global-batch gradients (gloo test)
+- [x] Educational explicit all-reduce demo (`collectives_demo.py`)
 - [ ] 1 vs 2 GPU throughput benchmark *(pending hardware)*
 
 ### Milestone 3 — Memory optimization
@@ -97,10 +96,22 @@ Full M1 design, for reference: [milestones/M1_gpt_baseline.md](milestones/M1_gpt
 
 ## Measured results
 
-None recorded yet, deliberately. The tiny preset trains end to end on CPU and MPS and the loop
-prints `tokens_per_sec`, but those short runs include warmup and are not a benchmark: no warmup
-discard, no repeats, no variance. The benchmark harness is Milestone 6, and the first numbers
-worth recording here are M2's 1-vs-2-rank comparisons.
+**No throughput numbers recorded**, deliberately. The loop prints `tokens_per_sec`, but short runs
+include warmup and have no repeats or variance, and more importantly a 2-rank gloo run on one CPU
+is *slower* than one process — it adds communication and buys no parallelism, so a local
+measurement would be actively misleading rather than merely imprecise. The benchmark harness is
+Milestone 6; the 1-vs-2-GPU comparison needs two NVIDIA GPUs (Kaggle's free `T4 x2` is the planned
+venue).
+
+One **correctness** result is worth recording, since it is the milestone's actual claim. tiny
+preset, CPU, 4 steps, global batch 16 either way:
+
+| Run | Config | Step losses | Grad norms |
+|---|---|---|---|
+| 1 rank | micro=8 x accum=2 | 10.8652, 10.8624, 10.8589, 10.8704 | 0.901, 0.914, 0.866, 0.831 |
+| 2 ranks | micro=8 x accum=1 | 10.8652, 10.8624, 10.8589, 10.8704 | 0.901, 0.914, 0.866, 0.831 |
+
+Identical, as data parallelism requires. Only throughput differed.
 
 Record only numbers that were actually measured, with the config, hardware, and commit that
 produced them.
@@ -108,6 +119,69 @@ produced them.
 ## Session log
 
 Newest first.
+
+### 2026-11-08 — M2: distributed data parallel (complete, benchmarks pending hardware)
+
+Whole-milestone pass, as authorized for M1–M2. Scoped first in
+[milestones/M2_ddp.md](milestones/M2_ddp.md) (the all-reduce/large-batch equivalence worked
+through, DDP's bucketing and overlap, why `no_sync` is safe, why clipping must follow
+synchronization).
+
+**Built.** `distributed/config.py` (`DistributedConfig`: backend `auto|gloo|nccl`, explicit
+timeout) and `distributed/setup.py` (`DistInfo`, `init_distributed` / `destroy_distributed`,
+`barrier`, `all_reduce_mean`). `init_distributed` is a no-op without torchrun's environment, so
+one entry point serves both single-process and distributed runs and **every M1 path is unchanged**.
+`BatchStream` gained rank sharding (D17). `Trainer` gained a `DistInfo`, DDP wrapping with
+`raw_model` kept separate from the wrapper, `no_sync` on all but the last micro-batch, clipping
+after the synchronizing backward, loss/eval aggregation, cluster-wide token counting, and
+rank-0-only logging (`NullLogger` elsewhere) and checkpointing with a barrier.
+`distributed/collectives_demo.py` does the averaging by hand, outside the training path.
+
+**Results: 241 passed** (`pytest -q`, CPU, ~47 s), up from 201, including **30 two-process gloo
+tests**. All exit criteria met but the benchmark (*pending hardware*):
+- 2 ranks x micro=4 gradients match 1 process x micro=8 for every parameter, the tied embedding
+  included; every rank holds identical gradients after the all-reduce.
+- `no_sync` 2 ranks x accum=2 x micro=2 matches 1 process x micro=8.
+- The hand-rolled all-reduce reproduces DDP's gradients exactly.
+- A 2-rank checkpoint loads straight into a plain single-device `GPT`.
+- `torchrun --nproc_per_node=2` runs end to end, logs from rank 0 alone, all ranks exit 0.
+- On the **tiny preset**, 1 rank and 2 ranks at equal global batch give identical losses and
+  gradient norms (table above).
+
+**Mutation check** — 8 bugs injected, each caught, then reverted:
+
+| Mutation | Failures |
+|---|---|
+| give every rank the same shard | 11 |
+| log the rank-local loss instead of the global one | 3 |
+| count tokens for one rank only | 3 |
+| never suppress the all-reduce (drop `no_sync`) | 2 |
+| let every rank write the log | 2 |
+| sum gradients without dividing by world size | 1 |
+| checkpoint the DDP wrapper instead of the module | 1 |
+| average the eval loss per rank only | 1 *(0 on the first pass — see below)* |
+
+**Three things found, in the order they bit:**
+- The 2-process tests hung. DDP was fine — the *harness* was: torch hands tensors between
+  processes via shared memory, which needs the sender alive until the parent maps the storage, and
+  the workers exited right after `queue.put`. Switched to file-based results (ISSUES #7).
+- A test that counted DDP's synchronizations by patching `reducer.prepare_for_backward` failed:
+  it is a read-only C++ binding. Replaced with a behavioural test that is stronger — mid-group the
+  ranks' gradients must disagree, at the end they must agree (ISSUES #9).
+- The first mutation run showed **eval-loss aggregation was untested** (0 failures when removed).
+  Added a test asserting the per-rank losses genuinely differ and the reported value is their mean;
+  the mutation now fails. This is the second milestone in a row where mutation testing found a gap
+  the suite missed.
+
+**Known limitation recorded, not papered over** (ISSUES #8): `eval_steps` counts batches per rank,
+so a 2-rank run evaluates twice the validation data and reports a slightly different number
+(10.8641 vs 10.8636). Training loss and gradients are exactly comparable, which is what the
+equivalence tests pin; pinning the eval set to a fixed sample count belongs with M6's regression
+suite.
+
+Also decided: `global_batch_size` is **validated, not derived** (D16) — deriving would make one
+config mean different things at different world sizes. The error message teaches the right fix
+(reduce `grad_accum_steps` to hold the global batch fixed while adding ranks).
 
 ### 2026-11-07 — M1 steps 4–6: GPT model, synthetic data, training engine (M1 complete)
 

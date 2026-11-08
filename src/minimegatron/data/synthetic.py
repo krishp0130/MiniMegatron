@@ -131,23 +131,50 @@ class IndexStream:
 
 
 class BatchStream:
-    """Turns an `IndexStream` into micro-batches of `(x, y)` tensors.
+    """Turns an `IndexStream` into micro-batches of `(x, y)` tensors, optionally sharded by rank.
 
-    Micro-batch *m* holds stream positions `[m * micro_batch_size, (m+1) * micro_batch_size)`.
+    Micro-batch *m* on rank *r* of *R* reads the stream starting at
+
+        offset = m * micro_batch_size * R + r * micro_batch_size
+
+    so the union over ranks of micro-batch *m* is exactly the single-process micro-batch of size
+    `micro_batch_size * R` at the same index. That is what makes the data-parallel equivalence
+    tests exact rather than statistical: two ranks of 4 consume precisely the samples one process
+    of 8 would, in the same order.
+
+    Every rank gets the same number of samples, with no padded or dropped tail. Unequal shards
+    would silently reweight the averaged gradient, because the mean of per-rank means is only the
+    mean over the global batch when the shards are the same size.
+
     The trainer's micro-batch index is `step * grad_accum_steps + j`, so the samples consumed up
-    to any step depend only on the seed and the number of samples consumed, never on how they
-    were grouped.
+    to any step depend only on the seed, the world size and the number of samples consumed --
+    never on how they were grouped into batches.
     """
 
-    def __init__(self, dataset: Dataset, micro_batch_size: int, seed: int = 0) -> None:
+    def __init__(
+        self,
+        dataset: Dataset,
+        micro_batch_size: int,
+        seed: int = 0,
+        rank: int = 0,
+        world_size: int = 1,
+    ) -> None:
         if micro_batch_size <= 0:
             raise ValueError(f"micro_batch_size must be positive, got {micro_batch_size}")
+        if world_size <= 0:
+            raise ValueError(f"world_size must be positive, got {world_size}")
+        if not 0 <= rank < world_size:
+            raise ValueError(f"rank {rank} out of range for world_size {world_size}")
         self.dataset = dataset
         self.micro_batch_size = micro_batch_size
+        self.rank = rank
+        self.world_size = world_size
         self.stream = IndexStream(len(dataset), seed)
 
     def indices(self, micro_index: int) -> torch.Tensor:
-        return self.stream.take(micro_index * self.micro_batch_size, self.micro_batch_size)
+        global_batch = self.micro_batch_size * self.world_size
+        offset = micro_index * global_batch + self.rank * self.micro_batch_size
+        return self.stream.take(offset, self.micro_batch_size)
 
     def micro_batch(self, micro_index: int) -> tuple[torch.Tensor, torch.Tensor]:
         samples = [self.dataset[int(i)] for i in self.indices(micro_index)]

@@ -14,7 +14,46 @@ the fix rather than deleting them.
   and benchmarks on a rented Linux + NVIDIA machine (1 GPU for Triton/BF16, 2 GPUs for
   DDP/FSDP/TP scaling). All GPU results stay marked *pending* in PROGRESS.md until measured.
 
+### #8 — Validation loss is not comparable across world sizes
+- **Status:** open (documented semantics, not a bug)
+- **Detail:** `eval_steps` counts batches *per rank*, so the validation set covers
+  `eval_steps x micro_batch_size x world_size` samples. A 2-rank run therefore evaluates twice as
+  much data as a 1-rank run and reports a slightly different (better-estimated) number: 10.8641 vs
+  10.8636 on the tiny preset. Training loss and gradients *are* exactly comparable, which is what
+  the equivalence tests pin.
+- **Plan:** if validation curves are ever compared across world sizes, pin the evaluation set to a
+  fixed number of samples rather than a number of per-rank batches. Milestone 6's regression suite
+  is the natural place.
+
 ## Resolved issues
+
+### #9 — DDP's reducer cannot be monkeypatched, so count its effects instead
+- **Status:** resolved (test-design rule), 2026-11-08
+- **Symptom:** a test that wrapped `trainer.model.reducer.prepare_for_backward` to count
+  synchronizations failed with
+  `AttributeError: 'torch._C._distributed_c10d.Reducer' object attribute 'prepare_for_backward' is read-only`.
+- **Cause:** the reducer is a C++ binding, and DDP's all-reduces go through the ProcessGroup
+  directly rather than through Python's `dist.all_reduce`, so neither the object nor the call can
+  be patched from Python.
+- **Fix:** test the *observable consequence* instead, which turned out to be a stronger test
+  anyway: after the first micro-batch of a `no_sync` group the ranks' gradients must **disagree**
+  (each holds only its own shard's partial), and after the last they must agree exactly. That is
+  what "one synchronization per optimizer step" means operationally, and it does not depend on
+  DDP's internals.
+
+### #7 — Passing torch tensors through a `multiprocessing.Queue` deadlocks the parent
+- **Status:** resolved, 2026-11-08
+- **Symptom:** the 2-process DDP tests hung indefinitely. The same work, run from a standalone
+  script, completed in under a second with both ranks reporting identical losses and exit code 0 —
+  so DDP was fine and the *harness* was at fault.
+- **Cause:** `torch.multiprocessing` serializes tensors by handing over shared-memory file
+  descriptors, which requires the **sending process to stay alive** until the receiver has mapped
+  the storage. The workers put their results (dicts of gradient tensors) on the queue and exited
+  immediately, so the parent's `get()` waited forever.
+- **Fix:** workers `torch.save` their result to a per-rank file in a temp directory and the parent
+  loads it after joining. `torch.save` copies bytes to disk, so the handoff survives the sender's
+  exit; it also makes a dead rank diagnosable (a missing file plus its exit code) rather than an
+  indefinite wait. Any future harness that returns tensors from a subprocess must do the same.
 
 ### #6 — One global torch RNG makes interleaved trainers unsafe in tests
 - **Status:** resolved (test-design rule), 2026-11-07
@@ -184,3 +223,40 @@ The trainer logs every `log_interval` steps, and an evaluation that lands betwee
 boundaries gets a JSONL line of its own rather than being discarded or deferred. Logs are keyed by
 `step`, so an extra line is harmless to parse, whereas a silently skipped validation point is a
 hole in the curve.
+
+### D16 — `global_batch_size` is validated, not derived
+Given `global_batch_size`, the trainer could *derive* `grad_accum_steps` as
+`global / (micro x world_size)`. It deliberately does not: it checks the identity and refuses to
+start on a mismatch.
+
+Deriving would silently change the accumulation count when the world size changed, so the same
+config would mean different things on different launches — the class of thing this project's strict
+config loading exists to prevent (D10). Validation instead makes the contract explicit and the
+error actionable:
+
+```
+ConfigError: global_batch_size 16 != micro_batch_size 8 x grad_accum_steps 2 x dp_world_size 2 = 32
+```
+
+The lesson it teaches is the right one: **to hold the global batch fixed while adding ranks, reduce
+`grad_accum_steps`.** Verified on the tiny preset — 1 rank at micro=8 x accum=2 and 2 ranks at
+micro=8 x accum=1 produce *identical* losses and gradient norms, differing only in throughput.
+
+### D17 — Rank sharding formula
+Micro-batch *m* on rank *r* of *R* reads the global index stream starting at
+`m * micro_batch_size * R + r * micro_batch_size`.
+
+So the union over ranks of micro-batch *m* is exactly the single-process micro-batch of size
+`micro_batch_size * R` at the same index. This is what keeps the DDP equivalence tests exact rather
+than statistical, and it follows directly from M1's choice to define the stream over samples rather
+than batches (D12). Every rank gets the same number of samples, with no padded or dropped tail:
+unequal shards would silently reweight the averaged gradient, because the mean of per-rank means is
+only the mean over the global batch when the shards are the same size.
+
+### D18 — DDP equivalence tests run with `dropout=0`
+Identically seeded ranks draw identical dropout masks, which is wrong for data parallelism (the
+replicas should sample independently). Differently seeded ranks can't be compared against a
+single-device run at all. Correct per-rank dropout needs a model-parallel RNG tracker — different
+seeds in sharded regions, the same seed in replicated ones — which is deferred, exactly as the
+tensor-parallelism scope already defers it. Every equivalence test therefore sets `dropout=0`, and
+`grad_clip=0` so the comparison is on raw gradients.

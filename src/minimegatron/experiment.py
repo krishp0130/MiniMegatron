@@ -8,19 +8,21 @@ from typing import Any
 
 from minimegatron.config import ConfigError, from_dict, load_yaml
 from minimegatron.data.config import DataConfig
+from minimegatron.distributed.config import DistributedConfig
 from minimegatron.model.config import ModelConfig
 from minimegatron.training.config import TrainConfig
 
-# `distributed` arrives in Milestone 2.
-SECTIONS = ("model", "data", "train")
+SECTIONS = ("model", "data", "train", "distributed")
 
 
 @dataclass(frozen=True)
 class ExperimentConfig:
     model: ModelConfig
-    # `data` and `train` are optional, so a file that only describes a model shape stays valid.
+    # Every section but `model` is optional, so a file that only describes a model shape stays
+    # valid, and a single-process run never has to mention `distributed` at all.
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
+    distributed: DistributedConfig = field(default_factory=DistributedConfig)
 
 
 def config_from_dict(raw: dict[str, Any], source: str = "config") -> ExperimentConfig:
@@ -35,6 +37,9 @@ def config_from_dict(raw: dict[str, Any], source: str = "config") -> ExperimentC
         model=from_dict(ModelConfig, raw["model"], section="model"),
         data=from_dict(DataConfig, raw.get("data", {}), section="data"),
         train=from_dict(TrainConfig, raw.get("train", {}), section="train"),
+        distributed=from_dict(
+            DistributedConfig, raw.get("distributed", {}), section="distributed"
+        ),
     )
 
 
