@@ -13,8 +13,8 @@ harness.
 
 | Milestone | Scope | Status |
 |---|---|---|
-| 0. Setup | Repo, environment, packaging, context docs | done |
-| 1. Functional GPT baseline | Model, synthetic data, single-device training, unit tests | not started |
+| 0. Setup | Repo, environment, packaging, context docs | **done** |
+| 1. Functional GPT baseline | Model, synthetic data, single-device training, unit tests | **done** |
 | 2. Distributed data parallel | DDP, gradient sync validation, rank-aware logging | not started |
 | 3. Memory optimization | BF16, FSDP2, sharded checkpoints, memory measurements | not started |
 | 4. Tensor parallelism | Megatron-style column/row-parallel MLP and attention | not started |
@@ -24,6 +24,21 @@ harness.
 
 Detailed status: [docs/PROGRESS.md](docs/PROGRESS.md) · Scope: [docs/SCOPE.md](docs/SCOPE.md) ·
 Known issues and decisions: [docs/ISSUES.md](docs/ISSUES.md)
+
+## Quick start
+
+```bash
+.venv/bin/pytest -q                                     # the full test suite (CPU)
+.venv/bin/python -m minimegatron.train --config configs/tiny.yaml
+.venv/bin/python -m minimegatron.train --config configs/tiny.yaml --set train.max_steps=20
+.venv/bin/python -m minimegatron.train --config configs/tiny.yaml \
+    --resume runs/tiny/ckpt_000050.pt
+```
+
+Training writes JSONL metrics (`step`, `loss`, `lr`, `grad_norm`, `tokens_seen`,
+`tokens_per_sec`) and checkpoints to `train.out_dir`. `--set section.key=value` overrides any
+config value and is validated exactly as strictly as the YAML file. Resuming is bit-for-bit
+identical to an uninterrupted run on CPU, which a test asserts.
 
 ## Hardware support
 

@@ -9,3 +9,25 @@ model:
   dropout: 0.0
   attention_backend: reference
   norm_type: layernorm
+
+data:
+  dataset: random
+  n_items: 8192
+  seed: 0
+
+train:
+  max_steps: 1000
+  micro_batch_size: 4
+  grad_accum_steps: 8
+  global_batch_size: 32
+  lr: 2.5e-4
+  warmup_steps: 100
+  weight_decay: 0.1
+  grad_clip: 1.0
+  device: auto
+  seed: 1337
+  out_dir: runs/medium
+  log_interval: 10
+  eval_interval: 200
+  eval_steps: 10
+  ckpt_interval: 500

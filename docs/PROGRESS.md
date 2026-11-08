@@ -6,21 +6,32 @@ checklist items, add a session-log entry, and rewrite "Next up". Scope lives in
 
 ## Current state
 
-- **Active milestone:** 1 (Functional GPT baseline), steps 1–3 of 6 done
-- **Last updated:** 2026-10-23
-- **Test status:** 92 passed (`pytest tests/unit tests/numerical -q`, CPU + MPS)
+- **Active milestone:** 1 (Functional GPT baseline) **complete** — all 6 steps and all exit
+  criteria met. Next: Milestone 2 (DDP).
+- **Last updated:** 2026-11-07
+- **Test status:** 201 passed (`pytest -q`, CPU; the 2 MPS tests ran on the M4 Pro)
 - **Verified hardware:** Apple M4 Pro (CPU + MPS). No NVIDIA GPU verification yet.
 
 ## Next up
 
-Milestone 1, step 4: `src/minimegatron/model/transformer.py`. The full `GPT` (token + position
-embeddings, `Block` × L, final norm, tied LM head, cross-entropy), GPT-2 init with residual
-projections scaled by 1/√(2L), and tests: param count == formula, loss at init ≈ ln V, tied
-weights share storage, gradients reach every parameter, reference vs. SDPA logits match.
+**Milestone 2 — distributed data parallel.** Scope it in `docs/milestones/M2_ddp.md` first
+(process-group lifecycle, DDP gradient synchronization, `no_sync` accumulation, rank-aware
+logging and rank-0 checkpointing, the gloo correctness test), then implement.
 
-Full M1 design (math, decisions, tests, exit criteria):
-[milestones/M1_gpt_baseline.md](milestones/M1_gpt_baseline.md).
-Build order: config → attention → layers → GPT model → synthetic data → training engine.
+The M1 pieces M2 builds directly on:
+- `training/trainer.py` takes a `dp_world_size` argument already; it is 1 in M1 and feeds the
+  `global_batch_size` cross-check (`micro × accum × dp_world_size`).
+- `data/synthetic.py`'s `IndexStream` is defined over samples, not batches (D12), so rank
+  sharding slots in without disturbing the single-device sample order — which is what makes
+  "DDP gradients == reference global-batch gradients" a meaningful comparison.
+- `tests/unit/test_train.py::test_accumulation_matches_one_large_batch` is the single-process
+  form of exactly the equivalence the DDP test must show across ranks.
+
+Two environment constraints to plan around (ISSUES #1, #3): gloo on macOS needs
+`GLOO_SOCKET_IFNAME=lo0` and an explicit master address, and every distributed subprocess needs a
+hard Python-side timeout. NCCL and all scaling benchmarks stay *pending hardware*.
+
+Full M1 design, for reference: [milestones/M1_gpt_baseline.md](milestones/M1_gpt_baseline.md).
 
 ## Milestone checklist
 
@@ -31,17 +42,18 @@ Build order: config → attention → layers → GPT model → synthetic data �
 - [x] Verified 2-process DDP and FSDP2 on CPU via gloo (see ISSUES.md for macOS quirks)
 - [x] Context docs: CLAUDE.md, SCOPE.md, PROGRESS.md, ISSUES.md
 
-### Milestone 1 — Functional GPT baseline
+### Milestone 1 — Functional GPT baseline ✅
 - [x] Milestone scoped ([M1_gpt_baseline.md](milestones/M1_gpt_baseline.md))
 - [x] Model config + validation (`config.py`, `model/config.py`, `experiment.py`, `configs/*.yaml`)
 - [x] Reference attention + SDPA backend (`model/attention.py`)
 - [x] Norms, MLP, transformer block (`model/layers.py`)
-- [ ] Full GPT model; param counts match formula (tiny 11,487,360 / small 51,237,888 / medium 124,475,904)
-- [ ] Synthetic dataset
-- [ ] Single-device training loop (AdamW, warmup + cosine, grad accumulation, clipping)
-- [ ] Checkpoint save/resume (model, optimizer, scheduler, RNG)
-- [ ] Loss-at-init ≈ ln V test, overfit test, bitwise resume test, CPU smoke test
-- [ ] `python -m minimegatron.train --config configs/tiny.yaml` works
+- [x] Full GPT model; param counts match formula (tiny 11,487,360 / small 51,237,888 / medium 124,475,904)
+- [x] Synthetic dataset
+- [x] Single-device training loop (AdamW, warmup + cosine, grad accumulation, clipping)
+- [x] Checkpoint save/resume (model, optimizer, scheduler, RNG)
+- [x] Loss-at-init ≈ ln V test, overfit test, bitwise resume test, CPU smoke test
+- [x] `python -m minimegatron.train --config configs/tiny.yaml` works (CPU and MPS)
+- [ ] *(stretch, deferred)* Real text data (`data/text.py`) — not required for sign-off
 
 ### Milestone 2 — Distributed data parallel
 - [ ] Process-group setup/teardown (`distributed/setup.py`)
@@ -85,12 +97,72 @@ Build order: config → attention → layers → GPT model → synthetic data �
 
 ## Measured results
 
-None yet. Record only numbers that were actually measured, with the config, hardware, and
-commit that produced them.
+None recorded yet, deliberately. The tiny preset trains end to end on CPU and MPS and the loop
+prints `tokens_per_sec`, but those short runs include warmup and are not a benchmark: no warmup
+discard, no repeats, no variance. The benchmark harness is Milestone 6, and the first numbers
+worth recording here are M2's 1-vs-2-rank comparisons.
+
+Record only numbers that were actually measured, with the config, hardware, and commit that
+produced them.
 
 ## Session log
 
 Newest first.
+
+### 2026-11-07 — M1 steps 4–6: GPT model, synthetic data, training engine (M1 complete)
+
+Run as a whole-milestone pass at the owner's request, rather than the usual step-at-a-time
+cadence. The `data/text.py` stretch item was deliberately skipped.
+
+**Step 4 — `model/transformer.py`.** `GPT`: token + learned position embeddings, `Block` × L,
+final norm, tied LM head, cross-entropy with `ignore_index=-100` computed in at least float32 via
+`torch.promote_types` (the #4 pattern). GPT-2 init, with `attn.out_proj` and `mlp.fc2` re-inited
+at `0.02/√(2L)` in a separate pass over the blocks. `num_params(include_embeddings=...)` on both
+the model and `ModelConfig`, so the doc's non-embedding column is testable.
+
+**Step 5 — `data/{synthetic,config}.py`.** `RandomTokenDataset` (unlearnable; for throughput
+work) and `MemorizationDataset` (fixed sequences; for the overfit test), both pure functions of
+`(seed, index)` through a SplitMix64 mixer. `IndexStream` + `BatchStream` define the sample order
+over *samples rather than batches* (D12), which is what makes the accumulation-equivalence and
+resume tests exact.
+
+**Step 6 — `training/` and `train.py`.** `TrainConfig`; decay/no-decay param groups; `lr_at` as a
+pure function behind `LambdaLR`; atomic checkpoints (`.tmp` + `os.replace`) carrying optimizer
+moments, scheduler, step, tokens, resolved config and all four RNGs; `JSONLLogger`; `Trainer`
+with 1/accum-scaled gradient accumulation, pre-clip grad-norm logging, device sync before timing,
+and no silent CPU fallback; a `--config/--resume/--set` CLI whose overrides are validated by the
+same path as the YAML. `data:`/`train:` sections added to `experiment.py` (both optional) and to
+the three presets.
+
+**Results: 201 passed** (`pytest -q`, CPU, ~15 s), up from 92. tiny reports exactly 11,487,360
+parameters / 1,779,840 non-embedding, matching the design doc's table. Loss at init 10.86 vs
+ln 50304 = 10.83. End-to-end runs verified on **both CPU and MPS**. All six M1 exit criteria met.
+
+**Mutation check** — 9 bugs injected by hand, each caught, then reverted:
+
+| Mutation | Failures |
+|---|---|
+| drop the causal mask | 15 |
+| untie the embedding and LM head | 15 |
+| restore the model but not the optimizer moments | 3 |
+| shift the targets the wrong way | 2 |
+| drop the 1/grad_accum loss scaling | 1 |
+| remove the residual 1/√(2L) init scaling | 1 |
+| skip RNG restore on resume | 1 |
+| ignore the live schedule on resume | 1 |
+| drop the global-batch-size cross-check | 1 |
+
+**Two bugs found while building, both by tests rather than by reading:**
+- An import cycle between `experiment.py` and `training/__init__.py` (ISSUES #5), fixed with a
+  `TYPE_CHECKING`-only import.
+- The learning rate after a resume came from the *saved* schedule, not the live one, so resuming
+  with a changed `max_steps` (which the CLI test does) took one step on the old curve (D14). The
+  first attempted fix was indistinguishable from doing nothing and was caught by the mutation
+  run, not by the test suite.
+
+Also recorded: a test-design rule after `evaluate()` was wrongly suspected of perturbing training
+— two trainers in one process share one global torch RNG and must be driven sequentially
+(ISSUES #6). M2's DDP equivalence tests will meet the same trap.
 
 ### 2026-10-25 — M1 step 3: norms, MLP, block
 - `model/layers.py`: functional `rms_norm` (the M5 Triton reference) + `RMSNorm` module,

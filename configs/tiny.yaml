@@ -9,3 +9,25 @@ model:
   dropout: 0.0
   attention_backend: reference
   norm_type: layernorm
+
+data:
+  dataset: random          # unlearnable: loss stays at ln V. Use `memorization` to watch it learn.
+  n_items: 4096
+  seed: 0
+
+train:
+  max_steps: 100
+  micro_batch_size: 8
+  grad_accum_steps: 2
+  global_batch_size: 16    # checked against micro x accum x dp_world_size; startup fails if wrong
+  lr: 6.0e-4
+  warmup_steps: 10
+  weight_decay: 0.1
+  grad_clip: 1.0
+  device: auto
+  seed: 1337
+  out_dir: runs/tiny
+  log_interval: 10
+  eval_interval: 50
+  eval_steps: 5
+  ckpt_interval: 50

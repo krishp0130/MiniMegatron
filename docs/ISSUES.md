@@ -16,6 +16,29 @@ the fix rather than deleting them.
 
 ## Resolved issues
 
+### #6 — One global torch RNG makes interleaved trainers unsafe in tests
+- **Status:** resolved (test-design rule), 2026-11-07
+- **Symptom:** a test that built two `Trainer`s, then stepped them alternately, saw different
+  losses from identical configs, which looked like a bug in `Trainer.evaluate`.
+- **Cause:** there is one global torch RNG. `Trainer.__init__` calls `seed_everything`, so
+  constructing the second trainer rewound the stream the first one was drawing dropout masks
+  from. The trainers were identical; the test was not.
+- **Fix:** any test comparing two runs in one process must drive them **sequentially** — build
+  and run A to completion, then build and run B (whose construction reseeds). Verified directly:
+  `evaluate()` leaves the torch RNG, the weights, and `model.training` untouched.
+  Milestone 2's DDP equivalence tests will hit this same trap.
+
+### #5 — Import cycle between `experiment.py` and `training/`
+- **Status:** resolved, 2026-11-07
+- **Symptom:** `ImportError: cannot import name 'ExperimentConfig' from partially initialized
+  module 'minimegatron.experiment'`.
+- **Cause:** `experiment.py` imports `training.config.TrainConfig`, which executes
+  `training/__init__.py`, which imports `trainer.py`, which imported `experiment.py`.
+- **Fix:** `trainer.py` needs `ExperimentConfig` only as a type annotation, so it is imported
+  under `if TYPE_CHECKING:` (`from __future__ import annotations` is already on, so annotations
+  are never evaluated at runtime). Package `__init__.py` files that re-export eagerly make a
+  cycle out of any config module a leaf imports; keep type-only imports deferred.
+
 ### #4 — `rms_norm` silently downcast float64 inputs to float32
 - **Status:** resolved (2026-10-25)
 - **Symptom:** float64 `gradcheck` of `rms_norm` failed: numerical and analytical Jacobians
@@ -120,3 +143,44 @@ property tests (here: `test_qkv_layout_splits_into_whole_heads`, plus behavioral
 gradcheck). Apply the same rule to TP, FSDP, and Triton: every comparison test needs an
 independent property test for the code both sides share.
 
+
+### D12 — The dataset index stream is defined over samples, not batches
+`IndexStream` is one infinite deterministic sequence of dataset indices — the concatenation of a
+seeded permutation per epoch — and a micro-batch is a slice of it at
+`micro_index * micro_batch_size`. So the sample *order* is a pure function of
+`(seed, sample_offset)` and does not depend on `micro_batch_size` or `grad_accum_steps`.
+
+Two things fall out, both of which would otherwise need extra machinery:
+- `grad_accum_steps=4, micro_batch_size=2` consumes byte-identical samples to
+  `grad_accum_steps=1, micro_batch_size=8`, so the gradient-accumulation equivalence test is
+  exact rather than statistical. Milestone 2's DDP test rests on the same property.
+- "Resume at step s" needs no dataloader state in the checkpoint at all: the step counter is the
+  stream position.
+
+### D13 — NumPy RNG state is stored as a tensor so checkpoints load with `weights_only=True`
+`torch.load(weights_only=True)` refuses to unpickle arbitrary objects, which is the right default
+for a file that may not be ours. NumPy's MT19937 state tuple contains a `uint32` ndarray, which
+that loader rejects, so `checkpoint.py` converts the key array to an int64 tensor on save and
+rebuilds the tuple on load. The alternative — `weights_only=False` — would mean every checkpoint
+load is an arbitrary-code-execution path, which is a poor trade for a framework whose Milestone 6
+deliberately feeds it corrupt checkpoints.
+
+### D14 — On resume, the learning rate is recomputed from the live schedule
+Restoring a run turned out to have a subtlety with two halves:
+- `LRScheduler.load_state_dict` restores `last_epoch` but does **not** write a learning rate into
+  the optimizer; that only happens inside `step()`.
+- The rate nevertheless survives, because the *optimizer's* `state_dict` carries its param groups,
+  `lr` included.
+
+So the rate comes back — but it is the rate the **previous** run's schedule produced. Resuming
+with a changed schedule (`--set train.max_steps=...`, a longer warmup) would silently take one
+step on the old curve. `Trainer.resume` therefore calls `set_lr_for_step(optimizer, cfg, step)`,
+computing the rate from the live config. Found by mutation testing: the first version of this fix
+pushed the scheduler's *stored* rate back instead, which no test could distinguish from doing
+nothing, because the optimizer had already restored the same value.
+
+### D15 — Validation measurements are never dropped to fit the logging cadence
+The trainer logs every `log_interval` steps, and an evaluation that lands between two logging
+boundaries gets a JSONL line of its own rather than being discarded or deferred. Logs are keyed by
+`step`, so an extra line is harmless to parse, whereas a silently skipped validation point is a
+hole in the curve.

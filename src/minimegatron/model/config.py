@@ -80,10 +80,14 @@ class ModelConfig:
     def head_dim(self) -> int:
         return self.d_model // self.n_heads
 
-    def num_params(self) -> int:
+    def num_params(self, include_embeddings: bool = True) -> int:
         """Exact parameter count, computed analytically from the config.
 
         The real model's count is tested against this, so the two must stay in sync.
+
+        With `include_embeddings=False` the token and position tables are excluded. Scaling-law
+        papers report that number because the embeddings hold a large share of a small model's
+        parameters (84% of the tiny preset) while doing none of the per-token computation.
         """
         d, f, V, T, L = self.d_model, self.d_ff, self.vocab_size, self.seq_len, self.n_layers
         b = 1 if self.bias else 0
@@ -95,4 +99,5 @@ class ModelConfig:
 
         embeddings = V * d + T * d  # token + learned position
         lm_head = 0 if self.tie_embeddings else V * d
-        return L * per_layer + embeddings + norm + lm_head  # + final norm
+        total = L * per_layer + embeddings + norm + lm_head  # + final norm
+        return total if include_embeddings else total - embeddings
