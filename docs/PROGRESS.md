@@ -6,10 +6,13 @@ checklist items, add a session-log entry, and rewrite "Next up". Scope lives in
 
 ## Current state
 
-- **Active milestone:** 5 (Triton kernels) **as complete as this machine allows**. Milestones 1–4
-  and 6 are done. M5's reference, test suite, dispatch, fallback and benchmark CLI are finished and
-  tested; **the Triton kernel itself is written but has never been executed** (ISSUES #16).
-  Next: Milestone 7 (final documentation).
+- **All seven milestones addressed.** M1–M4, M6 and M7 are complete. M5 is complete except for the
+  kernel itself, which is **written but has never been executed** (ISSUES #16) — there is no NVIDIA
+  GPU on this machine.
+- **Remaining work is hardware-gated, not unwritten.** Four of SCOPE.md §13's eleven
+  Definition-of-Done criteria need NVIDIA GPUs; see the table in the README and the commands in
+  [benchmarks.md](../docs/benchmarks.md). The harness, configs, baseline store and
+  backend-parameterized kernel tests all exist, so each pending item is a command.
 - **Last updated:** 2026-11-08
 - **Test status:** 455 passed, 37 skipped (`pytest -q`, CPU, ~126 s). By suite: 261 unit, 88
   distributed (two-process gloo), 73 kernels, 31 numerical, 27 fault-injection, 12 regression.
@@ -20,29 +23,29 @@ checklist items, add a session-log entry, and rewrite "Next up". Scope lives in
 
 ## Next up
 
-**Milestone 7 — final documentation.** `architecture.md`, `distributed_training.md`, `testing.md`,
-`benchmarks.md`, plus reproducible experiment instructions and the measured-results tables. Most of
-the substance already exists in the milestone docs, `docs/fsdp.md` and `docs/tensor_parallel.md`;
-M7 is largely organising it into the four documents SCOPE.md asks for and filling the results
-tables with whatever has actually been measured by then.
-
-**One GPU session closes everything else.** Nothing below is new work — the harness, the strategy
-configs, the baseline store and the backend-parameterized kernel tests are all in place:
+The project is wrapped. What is left needs hardware, and none of it needs new code:
 
 | Pending | Command | Needs |
 |---|---|---|
-| Triton kernel correctness (M5, ISSUES #16) | `pytest tests/kernels -q` | 1 NVIDIA GPU |
-| Triton vs reference runtime/bandwidth (M5) | `python -m minimegatron.benchmarks.kernels` | 1 NVIDIA GPU |
-| 1 vs 2 GPU throughput (M2) | `benchmarks.run` ×2 | 2 NVIDIA GPUs |
-| Peak memory, DDP vs FSDP (M3) | `benchmarks.run` with `strategy` overrides | 2 NVIDIA GPUs |
+| Triton kernel correctness (ISSUES #16) | `pytest tests/kernels -q` | 1 NVIDIA GPU |
+| Triton vs reference runtime/bandwidth | `python -m minimegatron.benchmarks.kernels` | 1 NVIDIA GPU |
+| Single-GPU training (DoD #3) | `python -m minimegatron.train --config configs/tiny.yaml` | 1 NVIDIA GPU |
+| 1 vs 2 GPU throughput (DoD #4) | `benchmarks.run` ×2 | 2 NVIDIA GPUs |
+| Peak memory, DDP vs FSDP (M3) | `benchmarks.run` with `*_2gpu.yaml` | 2 NVIDIA GPUs |
 | FP32 vs BF16 (M3) | `--set train.precision=bf16` | **Ampere+** (a T4 is sm_75, no bf16) |
 | TP vs DDP vs FSDP (M4) | `benchmarks.run` ×3 | 2 GPUs, ideally ± NVLink |
 
 Expect the kernel's first real run to surface bugs; that is the normal outcome for code written
-without ever executing it, and the test suite is arranged so those bugs land as test failures
-rather than as silently wrong training.
+without ever executing it, and the suite is arranged so they land as test failures rather than as
+silently wrong training.
 
-Also still open: a model-parallel RNG tracker, which is what dropout under TP needs (D18).
+Deferred by choice, in the order worth doing them:
+1. Vocab-parallel embedding and cross-entropy — the largest remaining TP memory win (84% of the
+   tiny preset's parameters are a replicated token table).
+2. A model-parallel RNG tracker, which unblocks dropout under TP (D18).
+3. Real text data and sampling (`data/text.py`, an M1 stretch item).
+4. 2D TP+DP composition — the `(dp, tp)` mesh and the strategy switch are the seams for it.
+5. Profiler traces through the benchmark harness (`torch.profiler` is already a dependency).
 
 ## Milestone checklist
 
@@ -123,9 +126,15 @@ Also still open: a model-parallel RNG tracker, which is what dropout under TP ne
 - [x] CI (GitHub Actions) running CPU-safe tests, gated on the collected test count (D30)
 - [x] The CLI documented in SCOPE.md §10 now exists (`configs/{benchmark,ddp_2gpu,fsdp_2gpu,tp_2gpu}.yaml`)
 
-### Milestone 7 — Final documentation
-- [ ] architecture.md, distributed_training.md, testing.md, benchmarks.md
-- [ ] Reproducible experiment instructions + measured results tables
+### Milestone 7 — Final documentation ✅
+- [x] Milestone scoped ([M7_documentation.md](milestones/M7_documentation.md))
+- [x] [architecture.md](../docs/architecture.md) — layering, the model, config, the loop, the seams
+- [x] [distributed_training.md](../docs/distributed_training.md) — the three strategies side by side
+- [x] [testing.md](../docs/testing.md) — six suites, mutation testing, test-design rules
+- [x] [benchmarks.md](../docs/benchmarks.md) — method, measured CPU results, pending commands
+- [x] Installation instructions and a documentation index in the README
+- [x] Known limitations and future work, stated plainly
+- [x] Honest Definition-of-Done assessment against SCOPE.md §13, item by item
 
 ## Measured results
 
@@ -203,6 +212,45 @@ produced them.
 ## Session log
 
 Newest first.
+
+### 2026-11-08 — M7: final documentation (project wrapped)
+
+Scoped in [milestones/M7_documentation.md](milestones/M7_documentation.md), whose single rule was
+**no claim may exceed its evidence**: six milestones of discipline about that get undone by one
+summary document that rounds "written but never executed" up to "implemented", or quotes a CPU
+figure without saying it is CPU.
+
+**Written.** The four documents SCOPE.md §11 names, each linking to code rather than restating it:
+- [architecture.md](../docs/architecture.md) — layering and the dependency rule (`model/` knows
+  nothing about `distributed/`, which is what makes the single-device model usable as *the*
+  reference), the config system's strictness rules, the training loop's non-obvious parts, the
+  three checkpoint formats and their one invariant, and a table of the four M1 decisions that each
+  paid off in a later milestone.
+- [distributed_training.md](../docs/distributed_training.md) — the three strategies side by side
+  with what each splits, communicates and buys; DDP in full (it had no standalone doc); the
+  `16P`-bytes-per-parameter argument for why FSDP and TP exist at all; and the table of every
+  correctness claim with the test that establishes it.
+- [testing.md](../docs/testing.md) — the six suites, the reference discipline, **60 mutations with
+  59 caught**, the six things mutation testing found that the suite could not, and the eight
+  test-design rules learned the hard way with their issue numbers.
+- [benchmarks.md](../docs/benchmarks.md) — the four rules that make a number worth recording, how
+  to reproduce any figure, the measured CPU table with its "relative overhead, not scaling" caveat,
+  and every pending measurement paired with the command and hardware that would produce it.
+
+**README restructured** into a front door: status, a documentation index, install, quick starts per
+strategy, known limitations, future work in priority order, and an **item-by-item Definition-of-Done
+assessment**. Four of the eleven criteria depend on NVIDIA hardware and are marked pending rather
+than done — including #7 (the Triton kernel), which is honestly **not met**.
+
+**Verified:** all internal documentation links resolve; `pytest -q` unaffected (455 passed, 37
+skipped). Also corrected the README's repository layout, which still described files the scope had
+sketched but the project never created (`distributed/ddp.py`, `kernels/reference.py`,
+`data/text.py`, `benchmarks/profiler.py`) and omitted the ones it did.
+
+**Final state.** 455 tests passing on CPU across six suites; 60 injected bugs with 59 caught; the
+first measured performance numbers recorded with their caveats; and every remaining gap reduced to
+a named command plus the hardware it needs. The one thing this project does not have is a GPU, and
+that fact is visible in every document rather than papered over in any of them.
 
 ### 2026-11-08 — M5: Triton RMSNorm (kernel written but UNVERIFIED)
 

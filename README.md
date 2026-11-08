@@ -20,10 +20,39 @@ harness.
 | 4. Tensor parallelism | Megatron-style column/row-parallel MLP and attention | **done** (benchmarks pending GPU) |
 | 5. GPU kernel optimization | Triton RMSNorm, forward and backward, benchmarks | **partial** — tests, dispatch and fallback done; **kernel written but never executed** (ISSUES #16) |
 | 6. Reliability engineering | Regression and distributed tests, failure injection, CI | **done** |
-| 7. Documentation | Architecture, experiments, results tables | not started |
+| 7. Documentation | Architecture, experiments, results tables | **done** |
 
-Detailed status: [docs/PROGRESS.md](docs/PROGRESS.md) · Scope: [docs/SCOPE.md](docs/SCOPE.md) ·
-Known issues and decisions: [docs/ISSUES.md](docs/ISSUES.md)
+**455 tests pass on CPU** (37 skipped, all needing CUDA). **60 deliberate bugs injected across
+the six milestones; 59 caught** by the suite.
+
+## Documentation
+
+| Read this | For |
+|---|---|
+| [architecture.md](docs/architecture.md) | how it is put together, and *why the seams are where they are* |
+| [distributed_training.md](docs/distributed_training.md) | DDP, FSDP2 and TP side by side; how correctness is established |
+| [fsdp.md](docs/fsdp.md) | all-gather vs reduce-scatter, sharding units, mixed precision, checkpoints |
+| [tensor_parallel.md](docs/tensor_parallel.md) | the `f`/`g` pair, column→row pairing, head partitioning |
+| [testing.md](docs/testing.md) | the six suites, mutation testing, and the test-design rules learned the hard way |
+| [benchmarks.md](docs/benchmarks.md) | the measurement method, measured results, and what is still pending |
+| [PROGRESS.md](docs/PROGRESS.md) | current state, per-milestone session log, measured results |
+| [ISSUES.md](docs/ISSUES.md) | every problem hit (#1–#16) and every design decision (D1–D32) |
+| [SCOPE.md](docs/SCOPE.md) | the authoritative specification |
+| [milestones/](docs/milestones/) | the design doc written before each milestone was implemented |
+
+## Install
+
+Requires Python 3.11+ (3.12 recommended — D1).
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev,text,logging]"     # add ,gpu on a Linux + NVIDIA machine for Triton
+python scripts/check_env.py              # what this machine can and cannot run
+```
+
+`check_env.py` prints the same environment probe the benchmark harness records, so an environment
+report and a benchmark record can never disagree about the machine.
 
 ## Quick start
 
@@ -148,18 +177,9 @@ including the 2-process gloo tests, on every push.
 Multi-GPU (NCCL) and Triton results are **pending verification on NVIDIA hardware** until
 explicitly recorded in `results/`.
 
-## Setup
+## Environment notes
 
-Requires Python 3.11+.
-
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev,text,logging]"     # add ,gpu on a Linux + NVIDIA machine for Triton
-python scripts/check_env.py
-```
-
-### macOS notes for multi-process runs
+### macOS, for multi-process runs
 
 `gloo` can hang on macOS when it binds to the wrong network interface. Pin it to loopback:
 
@@ -174,16 +194,74 @@ FSDP2's `fully_shard` must be given an explicit CPU device mesh on Macs
 ## Layout
 
 ```text
-configs/              YAML experiment configs
+configs/              tiny/small/medium presets, ddp/fsdp/tp_2gpu, benchmark
 src/minimegatron/
-  model/              GPT model: attention, blocks, config
-  training/           trainer, optimizer and schedule, checkpointing, metrics
-  distributed/        process-group setup, DDP, FSDP2, tensor parallelism, collectives demo
-  kernels/            Triton kernels and their PyTorch references
-  data/               synthetic and text datasets
-  benchmarks/         benchmark harness and profiler helpers
-tests/                unit / numerical / distributed / kernels / fault_injection
-scripts/              utilities (environment check, experiment drivers)
-results/              benchmark outputs (baselines are versioned, ad-hoc runs ignored)
-docs/                 design and results documentation
+  config.py           ConfigError, strict dict->dataclass, YAML loading
+  experiment.py       ExperimentConfig: model/data/train/distributed/benchmark sections
+  train.py            CLI entry point
+  model/              config, attention (reference + sdpa), layers, transformer
+  data/               config, synthetic datasets + the deterministic index stream
+  training/           trainer, optimizer and schedule, checkpoint, metrics
+  distributed/        setup, fsdp, tensor_parallel, checkpoint, collectives_demo
+  kernels/            rmsnorm (Triton + dispatch to the PyTorch reference)
+  benchmarks/         harness, run, kernels, regression
+tests/                unit / numerical / distributed / kernels / fault_injection / regression
+scripts/              check_env.py
+results/baselines/    versioned performance baselines (other results/ output is gitignored)
+docs/                 architecture, distributed_training, fsdp, tensor_parallel, testing,
+                      benchmarks, SCOPE, PROGRESS, ISSUES, milestones/
+.github/workflows/    CI: the CPU-safe suite, gloo tests included
 ```
+
+## Known limitations
+
+Stated plainly, each with its reason. The fuller treatment is in
+[architecture.md](docs/architecture.md).
+
+- **The Triton kernel has never been executed** (ISSUES #16) — no NVIDIA GPU here, no macOS Triton
+  wheels. Written, not working.
+- **No GPU measurement exists anywhere in this repository.** Every throughput and memory comparison
+  the scope asks for is pending hardware; [benchmarks.md](docs/benchmarks.md) lists the exact
+  command for each.
+- **Dropout is unsupported under tensor parallelism** for comparisons (D18); a model-parallel RNG
+  tracker is needed first. All equivalence tests use `dropout=0`.
+- **2D TP+DP is refused, not silently mistrained** — a `tp_size` below the world size would leave
+  the data-parallel dimension without gradient synchronization.
+- **Embeddings are replicated under TP**, so the tiny preset's 9.7M token table (84% of it) is not
+  sharded. Vocab-parallel embeddings are the obvious next win.
+- **No real text data** — synthetic tokens only, so no sample from the model would be meaningful.
+- **Single node.** No elastic training, no pipeline parallelism, no FlashAttention (excluded from
+  the first phase by the scope).
+
+### Future work, in the order I would do it
+
+1. Run the Triton kernel and close ISSUES #16 — everything needed to judge it already exists.
+2. One 2-GPU session to fill every pending benchmark table.
+3. Vocab-parallel embedding and cross-entropy: the largest remaining TP memory win.
+4. A model-parallel RNG tracker, unblocking dropout under TP.
+5. Real text data and sampling.
+6. 2D TP+DP composition — the `(dp, tp)` mesh and the strategy switch are the seams for it.
+
+## Definition of Done
+
+Assessed against [SCOPE.md §13](docs/SCOPE.md), item by item. The scope's own fallback clause
+applies throughout: *"If two GPUs are unavailable, implement the distributed interfaces, test what
+is possible locally (gloo on CPU), and explicitly mark multi-GPU verification as pending. Do not
+fabricate test results."*
+
+| # | Criterion | Status |
+|---|---|---|
+| 1 | A GPT model trains and reduces loss on a small task | **met** — overfit test drives loss from ≈ln V to < 0.1 |
+| 2 | CPU-safe correctness tests pass | **met** — 455 passed, 37 skipped |
+| 3 | Single-GPU training works on CUDA | **pending hardware** — code paths exist and error clearly; never run |
+| 4 | DDP trains correctly across two GPUs, gradients verified | **gradients verified** on 2 gloo CPU ranks against a single-process reference; **two-GPU NCCL run pending** |
+| 5 | FSDP2 trains correctly with valid checkpointing | **correctness and checkpointing verified** on 2 gloo CPU ranks (DCP round trip, resume, consolidation); **two-GPU run pending** |
+| 6 | TP=2 matches the single-device reference in forward and gradients | **met** on 2 gloo CPU ranks — sharded gradients match the reference slice, replicated ones match in full |
+| 7 | A Triton kernel passes numerical and gradient tests | **not met** — the kernel has never executed (ISSUES #16). 34 tests are written and skip |
+| 8 | Automated validation catches deliberately introduced errors | **met** — 60 mutations injected, 59 caught |
+| 9 | Benchmark results reproducible from documented configs | **met for the CPU results**; GPU results do not exist yet |
+| 10 | Performance claims cite measured configurations | **met** — and no GPU performance claim is made anywhere |
+| 11 | Documented well enough for another engineer to run it | **met** — this README, six documents, and a design doc per milestone |
+
+Four of the eleven depend on NVIDIA hardware. Nothing in this repository claims otherwise, and no
+number appears that was not measured on the machine named beside it.
