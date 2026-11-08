@@ -5,9 +5,11 @@ from minimegatron.distributed.setup import (
     DistInfo,
     all_reduce_mean,
     barrier,
+    build_device_mesh,
     destroy_distributed,
     init_distributed,
     resolve_backend,
+    resolve_strategy,
 )
 
 __all__ = [
@@ -15,7 +17,9 @@ __all__ = [
     "DistributedConfig",
     "all_reduce_mean",
     "barrier",
+    "build_device_mesh",
     "destroy_distributed",
     "init_distributed",
     "resolve_backend",
+    "resolve_strategy",
 ]

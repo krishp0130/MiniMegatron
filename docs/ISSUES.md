@@ -25,6 +25,23 @@ the fix rather than deleting them.
   fixed number of samples rather than a number of per-rank batches. Milestone 6's regression suite
   is the natural place.
 
+### #10 — Autocast leaves the residual stream in FP32, so BF16 losses barely move
+- **Status:** open (documented behaviour, not a bug)
+- **Symptom:** a `precision: bf16` run on the tiny preset printed losses *identical to FP32 at four
+  decimal places* (10.8624, 10.8704) with identical gradient norms, which looked like autocast was
+  not active at all. Throughput told a different story: ~153 vs ~18,000 tokens/s, a ~100x slowdown
+  from emulated bf16 on Apple silicon.
+- **Cause:** autocast has an op table. `Linear` runs in bf16; normalization stays fp32 (its
+  reductions need the range); `Embedding` is untouched. The residual stream is therefore
+  `fp32 + bf16`, which **promotes back to fp32** and is never downcast. Only the matmuls are low
+  precision, and at initialization — where logits are near-uniform and the loss is dominated by
+  ln(V) — their rounding moves the loss by less than 1e-4.
+- **Resolution:** this is autocast working as designed, and the reason mixed precision is safe.
+  `tests/unit/test_precision.py::test_matmuls_run_in_bf16_while_parameters_stay_fp32` pins the
+  dtype at four points (linear bf16, norm fp32, embedding fp32, block output fp32) instead of
+  checking a single activation, so the distinction is asserted rather than inferred. The lesson:
+  verify a precision mode by the dtype at each op, never by whether the loss changed.
+
 ## Resolved issues
 
 ### #9 — DDP's reducer cannot be monkeypatched, so count its effects instead
@@ -260,3 +277,73 @@ single-device run at all. Correct per-rank dropout needs a model-parallel RNG tr
 seeds in sharded regions, the same seed in replicated ones — which is deferred, exactly as the
 tensor-parallelism scope already defers it. Every equivalence test therefore sets `dropout=0`, and
 `grad_clip=0` so the comparison is on raw gradients.
+
+### D19 — `dtype` is parameter storage; `precision` is compute
+Two separate settings, deliberately:
+- `ModelConfig.dtype` — parameter **storage**, always `float32`.
+- `TrainConfig.precision` — **compute**, `fp32` or `bf16`.
+
+Mixed precision means bf16 math over **fp32 master weights**: the optimizer step, weight decay and
+gradient clipping all stay fp32. bf16 has 8 mantissa bits, so `w + small_update == w` far more
+often than in fp32, and keeping updates in low precision is how mixed-precision training quietly
+stops converging. `ModelConfig`'s rejection of `dtype: bfloat16` now says this and points at
+`train.precision` rather than at "Milestone 3".
+
+The loss needs no precision-specific code at all: `GPT.forward` already promotes logits with
+`torch.promote_types(dtype, float32)` before cross-entropy (ISSUES #4), so the log-sum-exp over the
+vocabulary is fp32 under autocast for free. An M1 bug fix paid for an M3 requirement.
+
+### D20 — FSDP sharding units are transformer blocks
+`fully_shard` is applied to each `Block`, then to the root. Each call creates one *unit* — the
+granularity at which parameters are all-gathered before use and freed after.
+
+- Per-block: peak transient memory is one block's parameters. This is the actual saving.
+- Root only: parameters would be *stored* sharded but the forward would gather the whole model at
+  once, so peak memory would be no better than DDP. Storage sharding without gather granularity
+  buys nothing.
+- Finer (per `Linear`): more, smaller collectives with fixed overhead each, for a saving already
+  small next to one block.
+
+Two consequences recorded because both fail *quietly* rather than loudly:
+- **The optimizer must be built after `fully_shard`**, which replaces parameters with `DTensor`s in
+  place. An optimizer built earlier allocates full-size `m` and `v` and updates tensors the model
+  no longer uses — the run trains fine and the memory saving simply does not happen.
+- **The tied embedding stays in the root unit** (D8). Wrapping only blocks and the root gives this
+  for free, but it is asserted rather than argued: a shared parameter gathered and freed on two
+  schedules produces subtly wrong gradients, not a crash.
+
+Verified in a spike before any code was written: after sharding, `to_local().numel()` sums to
+exactly `P/R` (10,880 of 21,760 at R=2), and `clip_grad_norm_` computes the correct **global** norm
+across `DTensor` shards — both ranks reported an identical 1.36097407341, so no hand-rolled
+collective was needed.
+
+### D21 — FSDP writes two checkpoint formats, and RNG per rank
+Every FSDP checkpoint produces both:
+1. `ckpt_NNNNNN/` — sharded via `torch.distributed.checkpoint`; each rank writes its own shard and
+   nothing is gathered, so a model too large for one device still saves. Resume uses this.
+2. `ckpt_NNNNNN_full.pt` — a full fp32 state dict gathered on rank 0 and written through M1's
+   single-file writer.
+
+The second is not redundant. It keeps checkpoints **interchangeable across strategies**, which is
+what lets an FSDP run be compared against the single-device reference at all — the milestone's
+actual evidence — and lets a sharded run's weights be loaded for inference with no FSDP present.
+It works unchanged because `state_dict` does not deduplicate tied weights: both `tok_emb.weight`
+and `lm_head.weight` appear, exactly as in a plain `GPT.state_dict()`.
+
+**RNG state is saved per rank** (`rng_0.pt`, `rng_1.pt`), not only from rank 0. Random state differs
+by rank, so restoring one rank's streams everywhere would make a resumed run diverge from an
+uninterrupted one — M1's reasoning for capturing RNG at all, extended to a cluster.
+
+### D22 — Autocast is skipped under FSDP
+`precision: bf16` uses `torch.autocast` for `single` and `ddp`, and FSDP2's
+`MixedPrecisionPolicy(param_dtype=bf16, reduce_dtype=fp32)` under `fsdp` — never both.
+
+They are not interchangeable. `param_dtype=bf16` stores shards in fp32 but **all-gathers them as
+bf16**, halving the volume of FSDP's dominant collective; autocast converts at the op boundary,
+after the gather has already moved fp32 bytes. Under FSDP the gather dtype *is* the bandwidth
+story. `reduce_dtype=fp32` then keeps the gradient reduce-scatter accumulating in fp32, because
+summing many small bf16 gradients loses precision where it matters and the reduction is cheap next
+to the gather.
+
+Since the policy also casts forward inputs, autocast on top would be redundant double-casting, so
+`Trainer._autocast()` returns a null context under FSDP.

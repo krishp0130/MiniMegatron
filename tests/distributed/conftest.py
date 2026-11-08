@@ -122,7 +122,7 @@ def run_distributed(
 NANO_MODEL = dict(vocab_size=128, seq_len=16, n_layers=2, n_heads=4, d_model=32, d_ff=64)
 
 
-def nano_experiment(out_dir: str, **train_overrides):
+def nano_experiment(out_dir: str, strategy: str = "auto", **train_overrides):
     """A tiny experiment config, identical in the parent and in every spawned rank.
 
     `dropout=0` throughout: identically seeded ranks would draw identical masks (wrong for data
@@ -131,6 +131,7 @@ def nano_experiment(out_dir: str, **train_overrides):
     `grad_clip=0` keeps the comparison on raw gradients.
     """
     from minimegatron.data.config import DataConfig
+    from minimegatron.distributed.config import DistributedConfig
     from minimegatron.experiment import ExperimentConfig
     from minimegatron.model.config import ModelConfig
     from minimegatron.training.config import TrainConfig
@@ -153,6 +154,7 @@ def nano_experiment(out_dir: str, **train_overrides):
         model=ModelConfig(dropout=0.0, **NANO_MODEL),
         data=DataConfig(dataset="memorization", n_items=256, n_sequences=16, seed=0),
         train=TrainConfig(**train),
+        distributed=DistributedConfig(backend="gloo", strategy=strategy),
     )
 
 

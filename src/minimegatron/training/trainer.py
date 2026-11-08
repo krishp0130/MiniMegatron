@@ -20,7 +20,15 @@ from torch.nn.utils import clip_grad_norm_
 
 from minimegatron.config import ConfigError
 from minimegatron.data.synthetic import BatchStream, build_dataset
-from minimegatron.distributed.setup import DistInfo, all_reduce_mean, barrier
+from minimegatron.distributed.checkpoint import load_sharded, save_consolidated, save_sharded
+from minimegatron.distributed.fsdp import build_fsdp, precision_dtype
+from minimegatron.distributed.setup import (
+    DistInfo,
+    all_reduce_mean,
+    barrier,
+    build_device_mesh,
+    resolve_strategy,
+)
 from minimegatron.model.transformer import GPT
 from minimegatron.training.checkpoint import load_checkpoint, save_checkpoint
 from minimegatron.training.metrics import JSONLLogger, NullLogger
@@ -58,6 +66,24 @@ def resolve_device(spec: str, dist_info: DistInfo | None = None) -> torch.device
     return torch.device(spec)
 
 
+def validate_precision(precision: str, device: torch.device) -> None:
+    """Refuse bf16 on hardware that cannot do it, rather than quietly changing the numerics.
+
+    bf16 needs Ampere (sm_80) or newer. This matters concretely: the T4s on the free tier of most
+    notebook services are sm_75 and have no bf16 at all, so a silent fallback would produce a run
+    whose precision does not match its config -- and whose FP32-vs-BF16 comparison would be
+    meaningless. CPU and MPS both support bf16 here, so only CUDA needs the check.
+    """
+    if precision != "bf16":
+        return
+    if device.type == "cuda" and not torch.cuda.is_bf16_supported():
+        name = torch.cuda.get_device_name(device)
+        raise ConfigError(
+            f"precision 'bf16' requested but {name} does not support bfloat16 "
+            "(needs compute capability 8.0+); use precision 'fp32'"
+        )
+
+
 def synchronize(device: torch.device) -> None:
     """Wait for queued kernels to finish before reading a clock.
 
@@ -88,6 +114,7 @@ class Trainer:
     ) -> None:
         self.dist = dist_info if dist_info is not None else DistInfo()
         cfg.train.validate_global_batch(self.dist.world_size)  # refuse to start, don't warn
+        self.strategy = resolve_strategy(cfg.distributed.strategy, self.dist.world_size)
         self.cfg = cfg
         self.out_dir = Path(out_dir if out_dir is not None else cfg.train.out_dir)
 
@@ -96,12 +123,18 @@ class Trainer:
         # keeps a single-process run and rank 0 of a distributed run bit-identical at init.
         seed_everything(cfg.train.seed)
         self.device = resolve_device(cfg.train.device, self.dist)
+        validate_precision(cfg.train.precision, self.device)
+        # None for fp32; the autocast compute dtype for bf16. Parameters stay fp32 either way.
+        self.autocast_dtype = precision_dtype(cfg.train.precision)
 
-        # `raw_model` is always the real GPT; `model` may be a DDP wrapper around it. Keeping both
-        # means parameter access, clipping and checkpointing never depend on the wrapper.
+        # `raw_model` is always the real GPT; `model` may be a wrapper around it. Keeping both
+        # means parameter access, clipping and checkpointing never depend on the wrapper. (Under
+        # FSDP they are the same object: `fully_shard` modifies the module in place.)
         self.raw_model = GPT(cfg.model).to(self.device)
         self.model: nn.Module = self.raw_model
-        if self.dist.is_distributed and self.dist.world_size > 1:
+        self.mesh = None
+
+        if self.strategy == "ddp":
             self.model = DistributedDataParallel(
                 self.raw_model,
                 # One device per process on CUDA; gloo on CPU takes no device_ids.
@@ -111,7 +144,15 @@ class Trainer:
                 # turns any future unused parameter into a loud error rather than silent overhead.
                 find_unused_parameters=False,
             )
+        elif self.strategy == "fsdp":
+            # Explicit device type: letting FSDP build a default mesh means auto-detecting the
+            # accelerator, which finds MPS here and crashes (ISSUES #2).
+            self.mesh = build_device_mesh(self.device.type, self.dist.world_size)
+            self.model = build_fsdp(self.raw_model, self.mesh, cfg.train.precision)
 
+        # AFTER wrapping, always: `fully_shard` replaces parameters with sharded DTensors in
+        # place, so an optimizer built earlier would hold the pre-shard tensors and silently
+        # update nothing that matters.
         self.optimizer = build_optimizer(self.raw_model, cfg.train)
         self.scheduler = build_scheduler(self.optimizer, cfg.train)
 
@@ -135,6 +176,25 @@ class Trainer:
 
     # --- one optimizer step ---------------------------------------------------------------------
 
+    def _autocast(self):
+        """Run the forward in bf16 while parameters stay fp32 ("mixed precision").
+
+        The optimizer step, weight decay and clipping stay in fp32 outside this context -- fp32
+        master weights are what keep small updates from being rounded away, since bf16 has only 8
+        mantissa bits. The loss needs no special handling: `GPT.forward` already promotes logits
+        to at least fp32 before cross-entropy (the ISSUES #4 pattern), so the log-sum-exp over the
+        vocabulary -- the most precision-sensitive op in the model -- is fp32 for free.
+
+        Not used under FSDP, which has its own mechanism: `MixedPrecisionPolicy` already
+        all-gathers parameters as bf16 and casts forward inputs to match, so autocast on top would
+        be redundant double-casting. The two are not interchangeable, though -- autocast converts
+        at the op boundary, after the gather has already moved fp32 bytes, so only the policy
+        actually halves the communication.
+        """
+        if self.autocast_dtype is None or self.strategy == "fsdp":
+            return contextlib.nullcontext()
+        return torch.autocast(device_type=self.device.type, dtype=self.autocast_dtype)
+
     def _sync_context(self, is_last_micro_batch: bool):
         """Suppress DDP's gradient all-reduce on all but the last micro-batch of a step.
 
@@ -143,9 +203,30 @@ class Trainer:
         the results. Correctness is unaffected because local accumulation and all-reduce are both
         sums, and sums commute: allreduce(sum_j g_j) == sum_j allreduce(g_j).
         """
-        if is_last_micro_batch or not isinstance(self.model, DistributedDataParallel):
+        if is_last_micro_batch:
             return contextlib.nullcontext()
-        return self.model.no_sync()
+        if isinstance(self.model, DistributedDataParallel):
+            return self.model.no_sync()
+        if self.strategy == "fsdp":
+            return self._fsdp_no_sync()
+        return contextlib.nullcontext()
+
+    @contextlib.contextmanager
+    def _fsdp_no_sync(self):
+        """FSDP2's equivalent of DDP's `no_sync`: skip the gradient reduce-scatter.
+
+        `set_is_last_backward(False)` additionally tells FSDP not to run its end-of-backward
+        cleanup yet. The trade-off differs from DDP's: unreduced FSDP gradients accumulate
+        *unsharded*, so suppressing the collective costs memory to save bandwidth. Correct either
+        way, since reduction and accumulation are both sums.
+        """
+        self.model.set_requires_gradient_sync(False)
+        self.model.set_is_last_backward(False)
+        try:
+            yield
+        finally:
+            self.model.set_requires_gradient_sync(True)
+            self.model.set_is_last_backward(True)
 
     def train_step(self) -> dict[str, Any]:
         """Run `grad_accum_steps` micro-batches, then one optimizer step."""
@@ -161,7 +242,8 @@ class Trainer:
             with self._sync_context(is_last_micro_batch=j == accum - 1):
                 x, y = self.train_stream.micro_batch(self.step * accum + j)
                 x, y = x.to(self.device), y.to(self.device)
-                _, loss = self.model(x, y)
+                with self._autocast():
+                    _, loss = self.model(x, y)
                 # Gradients SUM across backward() calls, so scaling each micro-loss by 1/accum
                 # makes the accumulated gradient exactly the gradient of the mean loss over the
                 # global batch -- identical to one large batch, up to float rounding.
@@ -207,7 +289,8 @@ class Trainer:
             x, y = self.val_stream.micro_batch(j)
             # The unwrapped module: a DDP forward here would only add reducer bookkeeping, and
             # there is no backward to synchronize.
-            _, loss = self.raw_model(x.to(self.device), y.to(self.device))
+            with self._autocast():
+                _, loss = self.raw_model(x.to(self.device), y.to(self.device))
             total += loss
         self.model.train()
         # Each rank evaluated its own shard of equal size, so the mean of the means is the mean.
@@ -252,7 +335,13 @@ class Trainer:
     # --- checkpoints ----------------------------------------------------------------------------
 
     def checkpoint_path(self, step: int | None = None) -> Path:
-        return self.out_dir / f"ckpt_{self.step if step is None else step:06d}.pt"
+        """Single-file checkpoint path, or a directory under FSDP (DCP writes a directory)."""
+        stem = f"ckpt_{self.step if step is None else step:06d}"
+        return self.out_dir / (stem if self.strategy == "fsdp" else f"{stem}.pt")
+
+    def consolidated_path(self, step: int | None = None) -> Path:
+        """Where the gathered, single-device-compatible file goes alongside the shards."""
+        return self.out_dir / f"ckpt_{self.step if step is None else step:06d}_full.pt"
 
     def save(self, path: str | Path | None = None) -> Path:
         """Write a checkpoint from rank 0 only, then wait for it to exist.
@@ -263,7 +352,36 @@ class Trainer:
         and the file loads straight into a single-device model.
         """
         target = Path(self.checkpoint_path() if path is None else path)
-        if self.dist.is_main:
+
+        if self.strategy == "fsdp":
+            # Two formats, both written: the sharded directory is what resume uses and is the only
+            # one that scales past a single device's memory, while the consolidated file keeps
+            # checkpoints interchangeable with single-device and DDP runs -- which is what makes
+            # an FSDP run comparable to the reference at all.
+            save_sharded(
+                target,
+                model=self.model,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                step=self.step,
+                tokens_seen=self.tokens_seen,
+                config=self.cfg,
+                rank=self.dist.rank,
+                is_main=self.dist.is_main,
+                device=self.device,
+            )
+            save_consolidated(
+                self.consolidated_path(),
+                model=self.model,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                step=self.step,
+                tokens_seen=self.tokens_seen,
+                config=self.cfg,
+                is_main=self.dist.is_main,
+                device=self.device,
+            )
+        elif self.dist.is_main:
             save_checkpoint(
                 target,
                 model=self.raw_model,
@@ -280,13 +398,22 @@ class Trainer:
     def resume(self, path: str | Path) -> dict[str, Any]:
         """Restore a run exactly. The data position needs no state: the sample stream is a pure
         function of (seed, samples consumed), and `step` tells us how many that is."""
-        meta = load_checkpoint(
-            path,
-            model=self.raw_model,
-            optimizer=self.optimizer,
-            scheduler=self.scheduler,
-            map_location=self.device,
-        )
+        if Path(path).is_dir():
+            meta = load_sharded(
+                path,
+                model=self.model,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                rank=self.dist.rank,
+            )
+        else:
+            meta = load_checkpoint(
+                path,
+                model=self.raw_model,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                map_location=self.device,
+            )
         self.step = meta["step"]
         self.tokens_seen = meta["tokens_seen"]
         # The restored rate is the one the *previous* run's schedule produced; recompute it from

@@ -8,7 +8,8 @@ from minimegatron.config import ConfigError
 
 ATTENTION_BACKENDS = ("reference", "sdpa")
 NORM_TYPES = ("layernorm", "rmsnorm")
-# BF16 arrives with mixed precision in Milestone 3.
+# Parameter *storage* is always float32. Mixed precision is a compute setting; see
+# `TrainConfig.precision`, which runs the forward/backward in bf16 over fp32 master weights.
 SUPPORTED_DTYPES = ("float32",)
 
 
@@ -69,7 +70,10 @@ class ModelConfig:
         if self.norm_type not in NORM_TYPES:
             errors.append(f"norm_type must be one of {NORM_TYPES}, got {self.norm_type!r}")
         if self.dtype == "bfloat16":
-            errors.append("dtype 'bfloat16' is not supported yet (mixed precision lands in Milestone 3)")
+            errors.append(
+                "dtype is parameter storage and is always 'float32'; for bf16 compute set "
+                "train.precision: bf16, which keeps fp32 master weights"
+            )
         elif self.dtype not in SUPPORTED_DTYPES:
             errors.append(f"dtype must be one of {SUPPORTED_DTYPES}, got {self.dtype!r}")
 

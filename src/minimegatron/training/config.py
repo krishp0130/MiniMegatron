@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from minimegatron.config import ConfigError
 
 DEVICES = ("auto", "cpu", "cuda", "mps")
+PRECISIONS = ("fp32", "bf16")
 
 
 def _is_int(v: object) -> bool:
@@ -37,6 +38,10 @@ class TrainConfig:
     grad_clip: float = 1.0  # 0 disables clipping (the norm is still logged)
 
     device: str = "auto"
+    # Compute precision, NOT storage. `bf16` runs the forward/backward in bfloat16 while the
+    # parameters, the optimizer step, weight decay and clipping all stay float32 -- "mixed
+    # precision" with fp32 master weights. Parameter *storage* dtype is ModelConfig.dtype.
+    precision: str = "fp32"
     seed: int = 1337
     out_dir: str = "runs/default"
     log_interval: int = 10
@@ -81,6 +86,8 @@ class TrainConfig:
 
         if self.device not in DEVICES:
             errors.append(f"device must be one of {DEVICES}, got {self.device!r}")
+        if self.precision not in PRECISIONS:
+            errors.append(f"precision must be one of {PRECISIONS}, got {self.precision!r}")
         if not isinstance(self.out_dir, str) or not self.out_dir:
             errors.append(f"out_dir must be a non-empty string, got {self.out_dir!r}")
 

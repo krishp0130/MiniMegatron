@@ -16,7 +16,7 @@ harness.
 | 0. Setup | Repo, environment, packaging, context docs | **done** |
 | 1. Functional GPT baseline | Model, synthetic data, single-device training, unit tests | **done** |
 | 2. Distributed data parallel | DDP, gradient sync validation, rank-aware logging | **done** (benchmarks pending GPU) |
-| 3. Memory optimization | BF16, FSDP2, sharded checkpoints, memory measurements | not started |
+| 3. Memory optimization | BF16, FSDP2, sharded checkpoints, memory measurements | **done** (memory numbers pending GPU) |
 | 4. Tensor parallelism | Megatron-style column/row-parallel MLP and attention | not started |
 | 5. GPU kernel optimization | Triton RMSNorm, forward and backward, benchmarks | not started |
 | 6. Reliability engineering | Regression and distributed tests, failure injection, CI | not started |
@@ -54,8 +54,29 @@ GLOO_SOCKET_IFNAME=lo0 .venv/bin/torchrun --nnodes=1 --nproc_per_node=2 \
     -m minimegatron.distributed.collectives_demo
 ```
 
-Rank 0 does all the logging and checkpointing, and checkpoints store the unwrapped model, so a
-2-rank checkpoint loads straight into a single-device run. If `global_batch_size` is declared it is
+### FSDP2 (sharded parameters, gradients and optimizer state)
+
+```bash
+# strategy: single | ddp | fsdp (default `auto`: single on one rank, ddp on several).
+GLOO_SOCKET_IFNAME=lo0 .venv/bin/torchrun --nnodes=1 --nproc_per_node=2 \
+    --master_addr=127.0.0.1 --master_port=29502 \
+    -m minimegatron.train --config configs/tiny.yaml \
+    --set distributed.strategy=fsdp --set train.grad_accum_steps=1
+
+# BF16 mixed precision (autocast under single/ddp, MixedPrecisionPolicy under fsdp):
+.venv/bin/python -m minimegatron.train --config configs/tiny.yaml --set train.precision=bf16
+```
+
+FSDP writes two checkpoints per step: a sharded `ckpt_NNNNNN/` directory
+(`torch.distributed.checkpoint`, nothing gathered, used for resume) and a consolidated
+`ckpt_NNNNNN_full.pt` that loads into a plain single-device model. See [docs/fsdp.md](docs/fsdp.md)
+for all-gather vs reduce-scatter, sharding units, and the mixed-precision details.
+
+`train.precision` is *compute* precision over fp32 master weights; `model.dtype` is parameter
+storage and stays `float32`. bf16 needs Ampere or newer on CUDA and errors clearly otherwise.
+
+Rank 0 does all the logging and checkpointing, and single-device/DDP checkpoints store the
+unwrapped model, so a 2-rank checkpoint loads straight into a single-device run. If `global_batch_size` is declared it is
 checked against `micro_batch_size x grad_accum_steps x world_size` and the run refuses to start on
 a mismatch — to keep the global batch fixed while adding ranks, reduce `grad_accum_steps`.
 

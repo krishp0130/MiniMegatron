@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from minimegatron.config import ConfigError
 
 BACKENDS = ("auto", "gloo", "nccl")
+# single: one replica. ddp: replicate everything, shard the batch. fsdp: shard parameters,
+# gradients and optimizer state too. `auto` picks single or ddp from the world size.
+STRATEGIES = ("auto", "single", "ddp", "fsdp")
 
 
 def _is_int(v: object) -> bool:
@@ -23,6 +26,7 @@ class DistributedConfig:
     """
 
     backend: str = "auto"
+    strategy: str = "auto"
     # Collectives block until every rank arrives. A finite timeout turns a dead peer into an
     # error instead of a job that hangs until a scheduler kills it.
     timeout_seconds: int = 1800
@@ -31,6 +35,8 @@ class DistributedConfig:
         errors = []
         if self.backend not in BACKENDS:
             errors.append(f"backend must be one of {BACKENDS}, got {self.backend!r}")
+        if self.strategy not in STRATEGIES:
+            errors.append(f"strategy must be one of {STRATEGIES}, got {self.strategy!r}")
         if not _is_int(self.timeout_seconds) or self.timeout_seconds <= 0:
             errors.append(
                 f"timeout_seconds must be a positive integer, got {self.timeout_seconds!r}"

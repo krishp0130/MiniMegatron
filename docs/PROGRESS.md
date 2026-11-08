@@ -6,30 +6,35 @@ checklist items, add a session-log entry, and rewrite "Next up". Scope lives in
 
 ## Current state
 
-- **Active milestone:** 2 (Distributed data parallel) **complete** — all exit criteria met except
-  the throughput benchmark, which is *pending NVIDIA hardware*. Next: Milestone 3 (FSDP2).
+- **Active milestone:** 3 (Memory optimization: BF16 + FSDP2) **complete** — all exit criteria met
+  except the memory/throughput benchmarks, which are *pending NVIDIA hardware*. Next: Milestone 4
+  (tensor parallelism).
 - **Last updated:** 2026-11-08
-- **Test status:** 241 passed (`pytest -q`, CPU, ~47 s), including 30 two-process gloo tests
+- **Test status:** 285 passed, 1 skipped (`pytest -q`, CPU, ~92 s), including 54 two-process gloo
+  tests. The skip needs a CUDA device without bf16 support.
 - **Verified hardware:** Apple M4 Pro (CPU + MPS), 2-process gloo. No NVIDIA GPU verification yet.
 
 ## Next up
 
-**Milestone 3 — memory optimization (BF16 + FSDP2).** Scope it in `docs/milestones/M3_fsdp.md`
-first, then implement. Per CLAUDE.md this returns to the **one-step-at-a-time cadence** (the
-whole-milestone passes were authorized for M1 and M2 only).
+**Milestone 4 — tensor parallelism (Megatron-style).** Scope it in `docs/milestones/M4_tp.md`
+first, then implement. Where DDP/FSDP split the *batch*, TP splits each layer's *weight matrices*,
+so every rank computes a slice of every layer.
 
-M3 is also where the **`strategy:` switch** gets designed — deliberately deferred from M2, because
-a second strategy is what reveals where the seam belongs. What M2 leaves in place for it:
-- `Trainer` takes a `DistInfo` and keeps `raw_model` separate from the possibly-wrapped `model`,
-  so another wrapper slots in without touching clipping, checkpointing or parameter access.
-- Checkpoints already store the *unwrapped* state dict, so they stay interchangeable across
-  strategies (M3 must decide how sharded checkpoints relate to this).
-- `distributed/setup.py` owns process-group lifecycle; FSDP2 needs an **explicit** device mesh
-  built from the configured device type (`init_device_mesh("cpu", ...)`), never auto-detection,
-  which crashes on MPS (ISSUES #2).
+What M3 leaves in place for it:
+- `distributed/config.py` has the `strategy` switch; TP adds a `tp` case plus a `tp_size`, with
+  validation that `n_heads % tp_size == 0` and `d_ff % tp_size == 0` (SCOPE.md §6).
+- `distributed/setup.py` owns `build_device_mesh`, which TP needs for a process group distinct
+  from the DP group.
+- `Trainer` keeps `raw_model` separate from the wrapper and dispatches on `self.strategy`, so a
+  third strategy slots in without touching clipping, checkpointing or parameter access.
+- The M1 attention layout decision pays off here: QKV is laid out per head as `[h, 3, d_h]` (D6)
+  precisely so column-parallel TP gives each rank complete heads with no communication.
 
-Two things M3 will have to confront: BF16 is rejected by `ModelConfig` today with a pointer to
-Milestone 3, and the tied embedding must stay in the root sharding unit (D8).
+The TP work itself is explicit `torch.autograd.Function`s and collectives (D3), not DTensor — the
+`f`/`g` conjugate pair, `ColumnParallelLinear`/`RowParallelLinear`, parallel MLP and parallel
+attention, plus sharding a reference state dict into TP shards and gathering it back. Correctness
+runs on 2 gloo ranks; dropout stays 0 in comparisons until a model-parallel RNG tracker exists
+(D18).
 
 ## Milestone checklist
 
@@ -62,11 +67,15 @@ Milestone 3, and the tied embedding must stay in the root sharding unit (D8).
 - [x] Educational explicit all-reduce demo (`collectives_demo.py`)
 - [ ] 1 vs 2 GPU throughput benchmark *(pending hardware)*
 
-### Milestone 3 — Memory optimization
-- [ ] BF16 mixed precision
-- [ ] FSDP2 with per-block `fully_shard`
-- [ ] Sharded checkpoint save/restore (torch.distributed.checkpoint)
-- [ ] FSDP convergence vs reference (gloo test)
+### Milestone 3 — Memory optimization ✅
+- [x] Milestone scoped ([M3_fsdp.md](milestones/M3_fsdp.md))
+- [x] BF16 mixed precision (autocast for single/DDP, `MixedPrecisionPolicy` for FSDP — D22)
+- [x] `strategy: auto|single|ddp|fsdp` switch (deferred from M2 by design)
+- [x] FSDP2 with per-block `fully_shard` (D20)
+- [x] Sharded checkpoint save/restore (torch.distributed.checkpoint) + consolidation path (D21)
+- [x] FSDP convergence vs reference (gloo test)
+- [x] Per-rank parameter and optimizer-state sharding verified on CPU
+- [x] `docs/fsdp.md` (all-gather, reduce-scatter, sharding units, mixed precision, checkpoints)
 - [ ] Peak memory per rank, DDP vs FSDP comparison *(pending hardware)*
 
 ### Milestone 4 — Tensor parallelism
@@ -103,15 +112,28 @@ measurement would be actively misleading rather than merely imprecise. The bench
 Milestone 6; the 1-vs-2-GPU comparison needs two NVIDIA GPUs (Kaggle's free `T4 x2` is the planned
 venue).
 
-One **correctness** result is worth recording, since it is the milestone's actual claim. tiny
-preset, CPU, 4 steps, global batch 16 either way:
+**Correctness results**, which are the milestones' actual claims. tiny preset, CPU, 4 steps,
+global batch 16 in every row:
 
 | Run | Config | Step losses | Grad norms |
 |---|---|---|---|
-| 1 rank | micro=8 x accum=2 | 10.8652, 10.8624, 10.8589, 10.8704 | 0.901, 0.914, 0.866, 0.831 |
-| 2 ranks | micro=8 x accum=1 | 10.8652, 10.8624, 10.8589, 10.8704 | 0.901, 0.914, 0.866, 0.831 |
+| 1 rank, single | micro=8 x accum=2 | 10.8652, 10.8624, 10.8589, 10.8704 | 0.901, 0.914, 0.866, 0.831 |
+| 2 ranks, DDP | micro=8 x accum=1 | 10.8652, 10.8624, 10.8589, 10.8704 | 0.901, 0.914, 0.866, 0.831 |
+| 2 ranks, FSDP2 | micro=8 x accum=1 | 10.8652, 10.8624, 10.8589, 10.8704 | 0.901, 0.914, 0.866, 0.832 |
 
-Identical, as data parallelism requires. Only throughput differed.
+Identical, as both forms of parallelism require. (FSDP's step-4 grad norm differs in the fourth
+decimal from a different reduction order.) Only throughput differed.
+
+**Sharding, measured on CPU** (nano config, world_size 2) — the mechanism behind the memory
+saving, which is measurable here even though bytes are not:
+
+| Quantity | Full model | Per rank under FSDP2 |
+|---|---|---|
+| parameters | 21,760 | **10,880** (exactly half; shards partition it, nothing duplicated) |
+| optimizer state (Adam m + v) | 43,520 | **21,760** |
+
+DDP would hold all 65,280 elements on every rank; FSDP2 holds 32,640. That is the 16-bytes-per-
+parameter figure being divided by the world size.
 
 Record only numbers that were actually measured, with the config, hardware, and commit that
 produced them.
@@ -119,6 +141,75 @@ produced them.
 ## Session log
 
 Newest first.
+
+### 2026-11-08 — M3: BF16 + FSDP2 (complete, memory/throughput benchmarks pending hardware)
+
+Whole-milestone pass. Scoped first in [milestones/M3_fsdp.md](milestones/M3_fsdp.md), and the
+riskiest parts were **spiked before any code was written** — a throwaway 2-rank script confirmed
+that `fully_shard` shards to exactly P/R, that `clip_grad_norm_` computes a correct global norm
+over `DTensor`s (both ranks: 1.36097407341), that tying survives sharding, and what a DCP
+directory actually contains. That removed every open risk from the plan.
+
+**Built.** `train.precision: fp32|bf16` with autocast in the trainer; `distributed.strategy:
+auto|single|ddp|fsdp` (`auto` preserves every prior default); `distributed/fsdp.py` (`build_fsdp`
+with per-block units, `MixedPrecisionPolicy`, and sharding introspection helpers);
+`distributed/setup.py` gained `resolve_strategy` and `build_device_mesh` (always an explicit device
+type — ISSUES #2); `distributed/checkpoint.py` with both the DCP sharded path and the consolidation
+path; `Trainer` dispatches on strategy, builds the optimizer **after** wrapping, and uses FSDP's
+`set_requires_gradient_sync` for accumulation. `docs/fsdp.md` written as the scope requires.
+
+**Results: 285 passed, 1 skipped** (`pytest -q`, CPU, ~92 s), up from 241, including **54
+two-process gloo tests**. All exit criteria met but the benchmarks (*pending hardware*):
+- FSDP gradients, loss and gradient norm match the single-device reference; a 5-step run tracks the
+  reference loss curve and ends at matching weights.
+- Each rank holds exactly half the parameters *and* half of Adam's state (table above).
+- bf16: parameters, gradients and optimizer state stay fp32; `Linear` runs in bf16 while norms,
+  embeddings and the residual stream stay fp32; the loss is fp32; a bf16 nano model still overfits
+  a fixed batch; bf16 also verified on MPS.
+- Under FSDP, parameters are **gathered** as bf16 while **stored** as fp32 — the saving autocast
+  cannot provide.
+- DCP round trip resumes exactly (2N steps straight == N + checkpoint + fresh trainer + resume + N);
+  the consolidated file loads into a plain single-device `GPT` with tying intact.
+- The real `torchrun` FSDP run matches the 1-rank run on the tiny preset (table above).
+
+**Mutation check** — 10 injected, 9 caught, 1 unverifiable on this hardware:
+
+| Mutation | Failures |
+|---|---|
+| shard only the root, not each block | 1 |
+| drop the FSDP mixed-precision policy | 1 |
+| reduce gradients in bf16 instead of fp32 | 1 |
+| build the optimizer before `fully_shard` | 1 |
+| consolidate without gathering the full state dict | 1 |
+| skip autocast entirely | 1 |
+| compute the loss in bf16 (drop the promote) | 1 |
+| allow ddp/fsdp with a single rank | 1 |
+| never suppress FSDP's reduce-scatter | 1 |
+| accept bf16 on CUDA without bf16 support | **0 — needs a CUDA device without bf16; test is skipped here** |
+
+(Counts are from `pytest -x`, so they mean "caught", not a total.)
+
+**Four things found, in the order they bit:**
+- A bf16 run printed losses *identical to fp32 at four decimals* while running 100x slower, which
+  looked like autocast was inert. It is not: autocast keeps norms, embeddings and the residual
+  stream in fp32 and only downcasts matmuls, and at initialization that moves the loss by <1e-4.
+  Recorded as ISSUES #10, and the test now pins the dtype at four points rather than checking one
+  activation. **Lesson: verify a precision mode by dtype per op, never by whether the loss moved.**
+- The first `no_sync` test for FSDP assumed `param.grad` would hold a partial mid-group. It is
+  `None`: FSDP accumulates in an internal *unsharded* buffer and only populates `.grad` at the
+  reduce-scatter. Probed both branches, then asserted the discriminating fact (suppressed →
+  `None`, synced → `DTensor`).
+- The first mutation pass had **two surviving mutations and one bad mutation**. The bad one built
+  an extra optimizer while leaving the real one in place, so it tested nothing — rewritten and then
+  caught. The two real gaps: nothing asserted the loss dtype under FSDP+bf16 (where the ISSUES #4
+  promote is genuinely load-bearing, since autocast — which has `cross_entropy` on its own fp32
+  list — is not active), and nothing tested FSDP's sync suppression at all. Both now covered.
+- Autocast under FSDP would be redundant double-casting, since `MixedPrecisionPolicy` already
+  casts parameters and forward inputs. `_autocast()` now returns a null context under FSDP (D22).
+
+Third milestone running where mutation testing found something the suite missed — and the first
+where it also caught a flaw in a *test of mine*, which is a useful reminder that a mutation that
+survives is as likely to be a bad mutation as a missing test.
 
 ### 2026-11-08 — M2: distributed data parallel (complete, benchmarks pending hardware)
 

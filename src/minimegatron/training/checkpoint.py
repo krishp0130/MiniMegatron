@@ -92,6 +92,8 @@ def save_checkpoint(
     tokens_seen: int,
     config: Any,
     device: torch.device | None = None,
+    model_state: dict[str, Any] | None = None,
+    optimizer_state: dict[str, Any] | None = None,
 ) -> Path:
     """Write a checkpoint atomically: to a temp file, then rename it into place.
 
@@ -102,10 +104,13 @@ def save_checkpoint(
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # The state dicts can be supplied directly, which is how a sharded (FSDP) run writes a
+    # *consolidated* checkpoint: it gathers full fp32 tensors first, then hands them here so the
+    # file is byte-format identical to a single-device checkpoint.
     payload = {
         "format_version": FORMAT_VERSION,
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
+        "model": model.state_dict() if model_state is None else model_state,
+        "optimizer": optimizer.state_dict() if optimizer_state is None else optimizer_state,
         "scheduler": scheduler.state_dict(),
         "step": step,
         "tokens_seen": tokens_seen,

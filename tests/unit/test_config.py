@@ -75,7 +75,8 @@ def test_config_is_frozen(nano_config):
         ({"bias": 1}, "bias must be true or false"),
         ({"attention_backend": "flash"}, "attention_backend must be one of"),
         ({"norm_type": "batchnorm"}, "norm_type must be one of"),
-        ({"dtype": "bfloat16"}, "Milestone 3"),
+        # dtype is parameter storage; bf16 compute is train.precision (Milestone 3).
+        ({"dtype": "bfloat16"}, "train.precision: bf16"),
         ({"dtype": "float16"}, "dtype must be one of"),
     ],
 )
