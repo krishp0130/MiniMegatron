@@ -62,7 +62,7 @@ class CausalSelfAttention(nn.Module):
         self.register_buffer("causal_mask", mask, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, d = x.shape
+        B, T, _ = x.shape
         if T > self.seq_len:
             raise ValueError(f"sequence length {T} exceeds the model's seq_len {self.seq_len}")
 
@@ -74,5 +74,9 @@ class CausalSelfAttention(nn.Module):
         else:
             y = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, is_causal=True)
 
-        y = y.transpose(1, 2).reshape(B, T, d)  # concatenate heads: (B, h, T, hd) -> (B, T, d)
+        # Concatenate heads: (B, h, T, hd) -> (B, T, h*hd). The width is derived from the heads
+        # this module owns, NOT from the input's d_model: under tensor parallelism `n_heads` is
+        # the local count, so the output is d_model/tp_size wide and feeds a row-parallel
+        # out_proj. Hard-coding the input width here breaks TP (ISSUES #11).
+        y = y.transpose(1, 2).reshape(B, T, -1)
         return self.resid_dropout(self.out_proj(y))

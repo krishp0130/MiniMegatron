@@ -27,7 +27,15 @@ from minimegatron.distributed.setup import (
     all_reduce_mean,
     barrier,
     build_device_mesh,
+    build_tp_mesh,
     resolve_strategy,
+)
+from minimegatron.distributed.tensor_parallel import (
+    clip_grad_norm_tp,
+    gather_tp_state_dict,
+    parallelize_model,
+    shard_state_dict,
+    validate_tp,
 )
 from minimegatron.model.transformer import GPT
 from minimegatron.training.checkpoint import load_checkpoint, save_checkpoint
@@ -113,8 +121,23 @@ class Trainer:
         echo: bool = True,
     ) -> None:
         self.dist = dist_info if dist_info is not None else DistInfo()
-        cfg.train.validate_global_batch(self.dist.world_size)  # refuse to start, don't warn
         self.strategy = resolve_strategy(cfg.distributed.strategy, self.dist.world_size)
+
+        # Tensor parallelism consumes ranks that are NOT data parallel: the TP ranks collectively
+        # compute one forward pass over one batch. So the data-parallel world -- which is what
+        # the batch is split across and what throughput should be counted over -- is the world
+        # divided by tp_size. Getting this wrong would inflate every tokens/s figure by tp_size.
+        if self.strategy == "tp":
+            # tp_size 0 means "the whole world", the basic version's assumption.
+            self.tp_size = cfg.distributed.tp_size or self.dist.world_size
+            validate_tp(cfg.model, self.tp_size, self.dist.world_size)
+        else:
+            self.tp_size = 1
+        self.dp_world_size = self.dist.world_size // self.tp_size
+        self.dp_rank = self.dist.rank // self.tp_size
+        self.tp_group = None
+
+        cfg.train.validate_global_batch(self.dp_world_size)  # refuse to start, don't warn
         self.cfg = cfg
         self.out_dir = Path(out_dir if out_dir is not None else cfg.train.out_dir)
 
@@ -149,6 +172,12 @@ class Trainer:
             # accelerator, which finds MPS here and crashes (ISSUES #2).
             self.mesh = build_device_mesh(self.device.type, self.dist.world_size)
             self.model = build_fsdp(self.raw_model, self.mesh, cfg.train.precision)
+        elif self.strategy == "tp":
+            # Every rank built an identical model (same seed), so the slices taken during surgery
+            # fit back together into exactly the reference model.
+            self.mesh = build_tp_mesh(self.device.type, self.dist.world_size, self.tp_size)
+            self.tp_group = self.mesh["tp"].get_group()
+            self.model = parallelize_model(self.raw_model, self.tp_group)
 
         # AFTER wrapping, always: `fully_shard` replaces parameters with sharded DTensors in
         # place, so an optimizer built earlier would hold the pre-shard tensors and silently
@@ -157,7 +186,9 @@ class Trainer:
         self.scheduler = build_scheduler(self.optimizer, cfg.train)
 
         micro = cfg.train.micro_batch_size
-        shard = dict(rank=self.dist.rank, world_size=self.dist.world_size)
+        # TP ranks must all see the SAME batch -- they jointly compute one forward pass -- so the
+        # data is sharded across the data-parallel world only.
+        shard = dict(rank=self.dp_rank, world_size=self.dp_world_size)
         self.train_stream = BatchStream(
             build_dataset(cfg.data, cfg.model, "train"), micro, cfg.data.seed, **shard
         )
@@ -255,7 +286,13 @@ class Trainer:
         # different norm from its own shard, so the effective threshold would depend on the world
         # size and the data split rather than on the configured value.
         max_norm = cfg.grad_clip if cfg.grad_clip > 0 else float("inf")
-        grad_norm = clip_grad_norm_(self.raw_model.parameters(), max_norm)
+        if self.strategy == "tp":
+            # The stock function would compute a rank-local norm: TP parameters are ordinary
+            # tensors that happen to be slices, with nothing marking them as sharded (unlike
+            # FSDP's DTensors, which carry their sharding and reduce correctly).
+            grad_norm = clip_grad_norm_tp(self.raw_model, max_norm, self.tp_group)
+        else:
+            grad_norm = clip_grad_norm_(self.raw_model.parameters(), max_norm)
 
         lr = self.optimizer.param_groups[0]["lr"]  # the LR this step actually used
         self.optimizer.step()
@@ -263,7 +300,7 @@ class Trainer:
 
         self.step += 1
         self.tokens_seen += (
-            accum * cfg.micro_batch_size * self.cfg.model.seq_len * self.dist.world_size
+            accum * cfg.micro_batch_size * self.cfg.model.seq_len * self.dp_world_size
         )
         return {
             "step": self.step,
@@ -335,9 +372,18 @@ class Trainer:
     # --- checkpoints ----------------------------------------------------------------------------
 
     def checkpoint_path(self, step: int | None = None) -> Path:
-        """Single-file checkpoint path, or a directory under FSDP (DCP writes a directory)."""
+        """Where this strategy's resumable checkpoint goes.
+
+        A directory under FSDP (DCP writes one), a per-rank file under TP (each rank owns a
+        different slice of every layer *and* its own optimizer moments, so there is no single
+        file that resumes the run), and one file otherwise.
+        """
         stem = f"ckpt_{self.step if step is None else step:06d}"
-        return self.out_dir / (stem if self.strategy == "fsdp" else f"{stem}.pt")
+        if self.strategy == "fsdp":
+            return self.out_dir / stem
+        if self.strategy == "tp":
+            return self.out_dir / f"{stem}_tp{self.dist.rank}.pt"
+        return self.out_dir / f"{stem}.pt"
 
     def consolidated_path(self, step: int | None = None) -> Path:
         """Where the gathered, single-device-compatible file goes alongside the shards."""
@@ -381,6 +427,33 @@ class Trainer:
                 is_main=self.dist.is_main,
                 device=self.device,
             )
+        elif self.strategy == "tp":
+            # Two files again, for the same reason as FSDP (D21). Each rank writes its own shard
+            # plus its optimizer state, which is what resume needs; rank 0 additionally writes a
+            # gathered, full model state dict so the result loads into a plain single-device GPT.
+            save_checkpoint(
+                target,
+                model=self.raw_model,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                step=self.step,
+                tokens_seen=self.tokens_seen,
+                config=self.cfg,
+                device=self.device,
+            )
+            full = gather_tp_state_dict(self.raw_model, self.tp_group)
+            if self.dist.is_main:
+                save_checkpoint(
+                    self.consolidated_path(),
+                    model=self.raw_model,
+                    optimizer=self.optimizer,
+                    scheduler=self.scheduler,
+                    step=self.step,
+                    tokens_seen=self.tokens_seen,
+                    config=self.cfg,
+                    device=self.device,
+                    model_state=full,
+                )
         elif self.dist.is_main:
             save_checkpoint(
                 target,
@@ -394,6 +467,16 @@ class Trainer:
             )
         barrier()
         return target
+
+    def load_full_state_dict(self, state: dict[str, Any]) -> None:
+        """Load a full (single-device) model state dict into this trainer's model.
+
+        Under TP the dict is sharded first, which is the inverse of the gather that wrote it --
+        so a checkpoint from any strategy can seed a run of any other.
+        """
+        if self.strategy == "tp":
+            state = shard_state_dict(state, self.dist.rank, self.tp_size)
+        self.raw_model.load_state_dict(state)
 
     def resume(self, path: str | Path) -> dict[str, Any]:
         """Restore a run exactly. The data position needs no state: the sample stream is a pure

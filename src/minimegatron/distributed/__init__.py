@@ -1,25 +1,59 @@
-"""Distributed training: process groups, DDP, and an educational collectives demo."""
+"""Distributed training: process groups, DDP, FSDP2, tensor parallelism, collectives demo."""
 
 from minimegatron.distributed.config import DistributedConfig
+from minimegatron.distributed.fsdp import build_fsdp, mixed_precision_policy, precision_dtype
 from minimegatron.distributed.setup import (
     DistInfo,
     all_reduce_mean,
     barrier,
     build_device_mesh,
+    build_tp_mesh,
     destroy_distributed,
     init_distributed,
     resolve_backend,
     resolve_strategy,
 )
+from minimegatron.distributed.tensor_parallel import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+    clip_grad_norm_tp,
+    copy_to_tp_region,
+    gather_from_tp_region,
+    gather_state_dict,
+    gather_tp_state_dict,
+    parallelize_model,
+    reduce_from_tp_region,
+    scatter_to_tp_region,
+    shard_state_dict,
+    tp_shard_dim,
+    validate_tp,
+)
 
 __all__ = [
+    "ColumnParallelLinear",
     "DistInfo",
     "DistributedConfig",
+    "RowParallelLinear",
     "all_reduce_mean",
     "barrier",
     "build_device_mesh",
+    "build_fsdp",
+    "build_tp_mesh",
+    "clip_grad_norm_tp",
+    "copy_to_tp_region",
     "destroy_distributed",
+    "gather_from_tp_region",
+    "gather_state_dict",
+    "gather_tp_state_dict",
     "init_distributed",
+    "mixed_precision_policy",
+    "parallelize_model",
+    "precision_dtype",
+    "reduce_from_tp_region",
     "resolve_backend",
     "resolve_strategy",
+    "scatter_to_tp_region",
+    "shard_state_dict",
+    "tp_shard_dim",
+    "validate_tp",
 ]

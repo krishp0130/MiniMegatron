@@ -17,7 +17,7 @@ harness.
 | 1. Functional GPT baseline | Model, synthetic data, single-device training, unit tests | **done** |
 | 2. Distributed data parallel | DDP, gradient sync validation, rank-aware logging | **done** (benchmarks pending GPU) |
 | 3. Memory optimization | BF16, FSDP2, sharded checkpoints, memory measurements | **done** (memory numbers pending GPU) |
-| 4. Tensor parallelism | Megatron-style column/row-parallel MLP and attention | not started |
+| 4. Tensor parallelism | Megatron-style column/row-parallel MLP and attention | **done** (benchmarks pending GPU) |
 | 5. GPU kernel optimization | Triton RMSNorm, forward and backward, benchmarks | not started |
 | 6. Reliability engineering | Regression and distributed tests, failure injection, CI | not started |
 | 7. Documentation | Architecture, experiments, results tables | not started |
@@ -79,6 +79,24 @@ Rank 0 does all the logging and checkpointing, and single-device/DDP checkpoints
 unwrapped model, so a 2-rank checkpoint loads straight into a single-device run. If `global_batch_size` is declared it is
 checked against `micro_batch_size x grad_accum_steps x world_size` and the run refuses to start on
 a mismatch — to keep the global batch fixed while adding ranks, reduce `grad_accum_steps`.
+
+### Tensor parallelism (Megatron-style)
+
+```bash
+# Splits each layer's weight matrices, so every rank computes a slice of every layer.
+# tp_size defaults to the whole world. The preset's global batch needs no change: TP ranks are
+# not data-parallel ranks, so the data-parallel world (and the batch) is unaffected.
+GLOO_SOCKET_IFNAME=lo0 .venv/bin/torchrun --nnodes=1 --nproc_per_node=2 \
+    --master_addr=127.0.0.1 --master_port=29503 \
+    -m minimegatron.train --config configs/tiny.yaml --set distributed.strategy=tp
+```
+
+Implemented by hand with explicit autograd functions and collectives rather than DTensor, so the
+`f`/`g` conjugate pair, the column→row pairing and the head partitioning are all readable in
+`distributed/tensor_parallel.py`. See [docs/tensor_parallel.md](docs/tensor_parallel.md).
+
+`n_heads % tp_size` and `d_ff % tp_size` are validated at startup. TP writes a per-rank checkpoint
+for resume plus a gathered `_full.pt` that loads into a plain single-device model.
 
 ## Hardware support
 

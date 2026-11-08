@@ -140,3 +140,19 @@ def build_device_mesh(device_type: str, world_size: int):
     from torch.distributed.device_mesh import init_device_mesh
 
     return init_device_mesh(device_type, (world_size,))
+
+
+def build_tp_mesh(device_type: str, world_size: int, tp_size: int):
+    """A 2-D (dp, tp) device mesh, even when the dp dimension is 1.
+
+    The basic version runs tensor parallelism alone (`tp_size == world_size`), so the dp dimension
+    has extent 1 and buys nothing today. Building the mesh with both named dimensions anyway is
+    what makes 2D TP+DP composition a configuration change later rather than a rewrite, and it
+    gives the TP group a real identity instead of implicitly meaning "everyone".
+    """
+    from torch.distributed.device_mesh import init_device_mesh
+
+    dp_size = world_size // tp_size
+    return init_device_mesh(
+        device_type, (dp_size, tp_size), mesh_dim_names=("dp", "tp")
+    )

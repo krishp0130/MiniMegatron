@@ -6,35 +6,35 @@ checklist items, add a session-log entry, and rewrite "Next up". Scope lives in
 
 ## Current state
 
-- **Active milestone:** 3 (Memory optimization: BF16 + FSDP2) **complete** — all exit criteria met
-  except the memory/throughput benchmarks, which are *pending NVIDIA hardware*. Next: Milestone 4
-  (tensor parallelism).
+- **Active milestone:** 4 (Tensor parallelism) **complete** — all exit criteria met except the
+  benchmarks, which are *pending NVIDIA hardware*. Next: Milestone 5 (Triton kernels), which
+  **cannot be written on this machine at all** (no CUDA/Triton, ISSUES #3).
 - **Last updated:** 2026-11-08
-- **Test status:** 285 passed, 1 skipped (`pytest -q`, CPU, ~92 s), including 54 two-process gloo
+- **Test status:** 344 passed, 1 skipped (`pytest -q`, CPU, ~124 s), including 83 two-process gloo
   tests. The skip needs a CUDA device without bf16 support.
 - **Verified hardware:** Apple M4 Pro (CPU + MPS), 2-process gloo. No NVIDIA GPU verification yet.
 
 ## Next up
 
-**Milestone 4 — tensor parallelism (Megatron-style).** Scope it in `docs/milestones/M4_tp.md`
-first, then implement. Where DDP/FSDP split the *batch*, TP splits each layer's *weight matrices*,
-so every rank computes a slice of every layer.
+**Milestone 5 — Triton kernels.** This is the first milestone that **cannot be developed locally**:
+Triton needs an NVIDIA GPU and does not install on macOS (ISSUES #3). The reference implementation
+it is checked against already exists — `rms_norm` in `model/layers.py` was written in M1 as that
+reference — so the work splits cleanly:
 
-What M3 leaves in place for it:
-- `distributed/config.py` has the `strategy` switch; TP adds a `tp` case plus a `tp_size`, with
-  validation that `n_heads % tp_size == 0` and `d_ff % tp_size == 0` (SCOPE.md §6).
-- `distributed/setup.py` owns `build_device_mesh`, which TP needs for a process group distinct
-  from the DP group.
-- `Trainer` keeps `raw_model` separate from the wrapper and dispatches on `self.strategy`, so a
-  third strategy slots in without touching clipping, checkpointing or parameter access.
-- The M1 attention layout decision pays off here: QKV is laid out per head as `[h, 3, d_h]` (D6)
-  precisely so column-parallel TP gives each rank complete heads with no communication.
+- *Possible here:* the numerical test suite against `rms_norm` (shapes, dtypes, extreme inputs,
+  float64 gradcheck), the config switch between the PyTorch and Triton paths, and the benchmark
+  harness, all written and exercised against the reference with the kernel stubbed out.
+- *Needs a GPU session:* the kernel itself, its backward, and every measurement.
 
-The TP work itself is explicit `torch.autograd.Function`s and collectives (D3), not DTensor — the
-`f`/`g` conjugate pair, `ColumnParallelLinear`/`RowParallelLinear`, parallel MLP and parallel
-attention, plus sharding a reference state dict into TP shards and gathering it back. Correctness
-runs on 2 gloo ranks; dropout stays 0 in comparisons until a model-parallel RNG tracker exists
-(D18).
+Given that, Milestone 6 (reliability: regression suite, failure injection, CI) is the better next
+target if no GPU session is booked — it is fully local, and it is where ISSUES #8 (pinning the
+evaluation set so validation loss is comparable across world sizes) belongs.
+
+Still open from earlier milestones and worth folding into whichever comes next:
+- Every benchmark table is *pending hardware*: M2's 1-vs-2-rank throughput, M3's peak memory and
+  FP32-vs-BF16, M4's TP-vs-DDP-vs-FSDP. One 2-GPU session covers nearly all of them; bf16 needs
+  Ampere or newer, so a T4 will not do.
+- A model-parallel RNG tracker, which is what dropout under TP needs (D18).
 
 ## Milestone checklist
 
@@ -78,14 +78,16 @@ runs on 2 gloo ranks; dropout stays 0 in comparisons until a model-parallel RNG 
 - [x] `docs/fsdp.md` (all-gather, reduce-scatter, sharding units, mixed precision, checkpoints)
 - [ ] Peak memory per rank, DDP vs FSDP comparison *(pending hardware)*
 
-### Milestone 4 — Tensor parallelism
-- [ ] `f`/`g` autograd communication primitives + unit tests
-- [ ] ColumnParallelLinear / RowParallelLinear vs `nn.Linear` tests
-- [ ] Parallel MLP and parallel attention (head partitioning)
-- [ ] Shard a full state dict into TP shards / gather back
-- [ ] TP forward + gradient equivalence vs single-device reference (gloo test)
-- [ ] TP config validation (`n_heads`, `d_ff` divisible by `tp_size`)
-- [ ] `docs/tensor_parallel.md`
+### Milestone 4 — Tensor parallelism ✅
+- [x] Milestone scoped ([M4_tp.md](milestones/M4_tp.md))
+- [x] `f`/`g` autograd communication primitives + scatter/gather variants + unit tests
+- [x] ColumnParallelLinear / RowParallelLinear vs `nn.Linear` tests
+- [x] Parallel MLP and parallel attention (head partitioning)
+- [x] Shard a full state dict into TP shards / gather back
+- [x] TP forward + gradient equivalence vs single-device reference (gloo test)
+- [x] TP-aware global gradient clipping (ISSUES #12)
+- [x] TP config validation (`n_heads`, `d_ff` divisible by `tp_size`)
+- [x] [`docs/tensor_parallel.md`](../docs/tensor_parallel.md)
 - [ ] TP vs DDP vs FSDP benchmarks *(pending hardware)*
 
 ### Milestone 5 — Triton kernels *(requires NVIDIA GPU)*
@@ -120,9 +122,24 @@ global batch 16 in every row:
 | 1 rank, single | micro=8 x accum=2 | 10.8652, 10.8624, 10.8589, 10.8704 | 0.901, 0.914, 0.866, 0.831 |
 | 2 ranks, DDP | micro=8 x accum=1 | 10.8652, 10.8624, 10.8589, 10.8704 | 0.901, 0.914, 0.866, 0.831 |
 | 2 ranks, FSDP2 | micro=8 x accum=1 | 10.8652, 10.8624, 10.8589, 10.8704 | 0.901, 0.914, 0.866, 0.832 |
+| 2 ranks, TP=2 | micro=8 x accum=2 | 10.8652, 10.8624, 10.8589, 10.8704 | 0.901, 0.915, 0.866, 0.832 |
 
-Identical, as both forms of parallelism require. (FSDP's step-4 grad norm differs in the fourth
-decimal from a different reduction order.) Only throughput differed.
+Identical, as every form of parallelism here requires. (Grad norms differ in the third or fourth
+decimal from different reduction orders.) Only throughput differed. Note the TP row keeps the
+preset's `accum=2` unchanged: TP ranks are not data-parallel ranks, so the global batch is
+unaffected (D24).
+
+**Tensor-parallel parameter counts**, tiny preset at `tp_size=2` — what is and is not split:
+
+| | Full model | Per rank, TP=2 |
+|---|---|---|
+| total | 11,487,360 | 10,599,936 |
+| non-embedding | 1,779,840 | 892,416 (0.5014x) |
+
+Non-embedding nearly halves; it is not *exactly* half because norms and row-parallel biases stay
+replicated. Total barely moves, because the 9.7M-parameter embedding table — 84% of this preset —
+is replicated in the basic version. That is the argument for vocab-parallel embeddings, which
+remain a documented stretch goal.
 
 **Sharding, measured on CPU** (nano config, world_size 2) — the mechanism behind the memory
 saving, which is measurable here even though bytes are not:
@@ -141,6 +158,76 @@ produced them.
 ## Session log
 
 Newest first.
+
+### 2026-11-08 — M4: tensor parallelism (complete, benchmarks pending hardware)
+
+Whole-milestone pass. Scoped first in [milestones/M4_tp.md](milestones/M4_tp.md), which worked
+through both ways to split a matmul, why the column->row pairing needs only one all-reduce per
+pair, and why the `f`/`g` asymmetry falls out of the calculus rather than being a convention.
+
+**Built.** `distributed/tensor_parallel.py`: the `f`/`g` conjugate pair plus scatter/gather
+variants as `torch.autograd.Function`s over raw `torch.distributed` collectives (D23);
+`ColumnParallelLinear` / `RowParallelLinear` with `from_linear` constructors that take this rank's
+slice; `parallelize_model` surgery that preserves module names (D25); `tp_shard_dim` /
+`shard_state_dict` / `gather_state_dict` / `gather_tp_state_dict`; `clip_grad_norm_tp`;
+`validate_tp`. `distributed.strategy` gained a `tp` case and a `tp_size`; `setup.py` gained
+`build_tp_mesh` (a 2-D `(dp, tp)` mesh even though dp is 1 here, as the seam for later).
+`Trainer` dispatches on strategy, shards data over the *data-parallel* world only (D24), and
+writes a per-rank checkpoint plus a gathered `_full.pt`.
+[`docs/tensor_parallel.md`](../docs/tensor_parallel.md) written as the scope requires.
+
+**Results: 344 passed, 1 skipped** (`pytest -q`, CPU, ~124 s), up from 285, including **83
+two-process gloo tests**. Every exit criterion met but the benchmarks (*pending hardware*). This
+also satisfies SCOPE.md success criterion 6 verbatim:
+- Each primitive tested in both directions; both parallel layers tested against `nn.Linear` for
+  output, input gradient and weight-gradient slice, with and without bias.
+- TP loss and gradient norm match the single-device reference; **sharded** parameter gradients
+  match the reference slice and **replicated** ones match in full and agree across ranks.
+- A 5-step run tracks the reference loss curve exactly and ends at matching weights.
+- Full state dict shards and gathers back exactly, for tp_size 1, 2 and 4.
+- The real `torchrun` TP run matches the 1-rank run on the tiny preset (table above).
+
+**Mutation check** — 11 injected, **11 caught**:
+
+| Mutation | Failures |
+|---|---|
+| row-parallel bias added BEFORE the all-reduce | 1 |
+| row-parallel bias split instead of replicated | 1 |
+| row-parallel bias treated as sharded in `tp_shard_dim` | 1 |
+| `f`: no all-reduce in the backward | 1 |
+| `g`: no all-reduce in the forward | 1 |
+| do not set the local head count | 1 |
+| column-parallel splits the wrong dimension | 1 |
+| TP clip: do not reduce the sharded squared norms | 1 |
+| TP clip: also reduce the replicated norms (double counting) | 1 |
+| shard data across the whole world, not the dp world | 1 |
+| attention output reshaped to the full `d_model` | 1 |
+
+(Counts are from `pytest -x`, so they mean "caught", not a total. First milestone where every
+mutation was caught on the first pass.)
+
+**Three things found:**
+- **The attention reshape assumed the full `d_model`** (ISSUES #11). Every TP test failed
+  instantly with a shape error. `CausalSelfAttention.forward` reshaped concatenated heads back to
+  its input's width, but under TP this rank holds only `n_heads/tp_size` heads. It survived three
+  milestones because nothing before M4 ever gave a layer a width different from `d_model` — D4
+  made the *layers* replaceable, but one shape assumption outside them was not.
+- **`clip_grad_norm_` was silently wrong** (ISSUES #12): 1.26595 per rank against a true global
+  norm of 1.296081, while losses matched to six decimals. Under TP `parameters()` yields ordinary
+  tensors that happen to be slices, with nothing marking them as sharded — unlike FSDP's
+  `DTensor`s, so M3's experience actively misled me. `clip_grad_norm_tp` all-reduces the sharded
+  squared norms and counts replicated ones once. **A correct loss does not imply correct
+  clipping.**
+- **`tp_size < world_size` would have trained silently wrong**, and was spotted by reasoning about
+  the mesh rather than by a test. It implies a real data-parallel dimension with *no* gradient
+  synchronization over it, so the dp groups would diverge. Since 2D TP+DP is out of scope, it is
+  now refused with an error that says why.
+
+A weight-comparison tolerance was also widened deliberately, after measuring rather than until
+green: the parallel matmuls sum in a different order and Adam divides by sqrt(v), so a ~1e-8
+gradient difference becomes ~1.4e-6 in a bias that started at exactly zero. The floor is absolute
+(1e-5), because a relative tolerance buys nothing for elements near zero, and it is still 0.25% of
+the largest bias.
 
 ### 2026-11-08 — M3: BF16 + FSDP2 (complete, memory/throughput benchmarks pending hardware)
 

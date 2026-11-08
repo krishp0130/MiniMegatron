@@ -44,6 +44,41 @@ the fix rather than deleting them.
 
 ## Resolved issues
 
+### #12 — `clip_grad_norm_` computes a rank-local norm under tensor parallelism
+- **Status:** resolved, 2026-11-08
+- **Symptom:** a TP run's logged gradient norm was 1.26595 where the single-device reference
+  reported 1.296081 — close enough to look like float noise, which is what makes it dangerous.
+  Losses matched to six decimal places, so nothing else hinted at a problem.
+- **Cause:** under TP, `model.parameters()` yields **ordinary tensors that happen to be slices**,
+  with nothing marking them as sharded. So each rank computed a norm over its own slices plus the
+  replicated parameters: neither the global norm nor even the same value on every rank. This is
+  precisely where TP differs from FSDP, whose `DTensor` gradients carry their sharding and let the
+  stock function reduce correctly — so the M3 experience ("clipping just works") was misleading.
+- **Fix:** `clip_grad_norm_tp` splits the parameters by `tp_shard_dim` and treats them
+  differently: sharded squared norms are **all-reduced** (`‖g_full‖² = Σᵣ ‖g_shardᵣ‖²`), replicated
+  ones are counted **once** and not reduced (reducing them would count them `tp_size` times). Both
+  halves are mutation-tested, because each produces a plausible-looking wrong number rather than
+  a crash.
+- **Lesson:** a correct loss does not imply correct clipping. Anything that aggregates *across all
+  parameters* — norms, global statistics, logging — needs its own treatment under any form of
+  model parallelism.
+
+### #11 — Attention's head-concatenation reshape assumed the full `d_model`
+- **Status:** resolved, 2026-11-08
+- **Symptom:** every TP model test failed with
+  `RuntimeError: shape '[8, 16, 32]' is invalid for input of size 2048`.
+- **Cause:** `CausalSelfAttention.forward` took `B, T, d = x.shape` and reshaped the concatenated
+  heads back to `d`. Under TP this rank holds only `n_heads/tp_size` heads, so its attention output
+  is `d_model/tp_size` wide and must feed a row-parallel `out_proj` at that width — but the reshape
+  demanded the full `d_model`.
+- **Fix:** `y.transpose(1, 2).reshape(B, T, -1)`. The width is now derived from the heads the
+  module actually owns rather than from its input's width, which is correct for both the
+  single-device and the tensor-parallel case.
+- **Why it survived three milestones:** nothing before M4 ever gave a layer a different width than
+  the model's `d_model`, so the assumption was invisible. D4 ("linear layers are separate named
+  modules so TP can replace them without restructuring the model") was *nearly* enough — the
+  layers were replaceable, but one shape assumption outside them was not.
+
 ### #9 — DDP's reducer cannot be monkeypatched, so count its effects instead
 - **Status:** resolved (test-design rule), 2026-11-08
 - **Symptom:** a test that wrapped `trainer.model.reducer.prepare_for_backward` to count
@@ -347,3 +382,48 @@ to the gather.
 
 Since the policy also casts forward inputs, autocast on top would be redundant double-casting, so
 `Trainer._autocast()` returns a null context under FSDP.
+
+### D23 — Tensor parallelism is hand-written, not DTensor
+Confirms D3 in code: the `f`/`g` conjugate pair and the scatter/gather variants are
+`torch.autograd.Function`s calling `torch.distributed` collectives directly. The backward of a
+collective is a *different* collective, which autograd cannot infer, so each one is spelled out.
+
+The point is pedagogical — every byte of communication is visible in our own code — but it also
+means TP gets none of DTensor's conveniences, which is exactly how ISSUES #12 happened.
+
+### D24 — TP ranks are not data-parallel ranks
+Tensor-parallel ranks jointly compute **one** forward pass over **one** batch, so they must all
+see the same input. The data-parallel world is therefore
+
+```
+dp_world_size = world_size // tp_size      (1 in the basic version)
+dp_rank       = rank // tp_size
+```
+
+and `BatchStream` is sharded over *that*, `tokens_seen` counts *that*, and `global_batch_size` is
+validated against `micro × accum × dp_world_size`. Getting it wrong would silently inflate every
+throughput figure by `tp_size`.
+
+A pleasant consequence: a preset's declared `global_batch_size` needs **no change** when TP is
+switched on, unlike DDP or FSDP where ranks are data-parallel and `grad_accum_steps` has to come
+down to compensate (D16).
+
+### D25 — Parallel layers are installed by surgery, with names preserved
+`parallelize_model` replaces the four `nn.Linear`s inside each block in place and leaves the module
+*names* untouched, so `state_dict` keys are identical to a single-device model's. That makes
+sharding a pure function of the parameter name (`tp_shard_dim`), which in turn is what lets the
+same function drive the state-dict round trip, the checkpoint gather, and the test that compares
+gradients against the reference. One source of truth for "what is split where".
+
+Two things surgery has to fix up beyond swapping the layers, both easy to miss and both tested:
+`attn.n_heads` must become the local count, and the attention output reshape must not assume the
+full `d_model` (ISSUES #11).
+
+### D26 — Row-parallel biases are replicated and added after the all-reduce
+A column-parallel layer's bias is split along the output dimension, like its weight. A
+row-parallel layer's bias is **not** split: every rank holds a full copy, and it is added *after*
+the `g` all-reduce. Adding it before would include it once per rank, i.e. `tp_size` times.
+
+This asymmetry is the single easiest thing to get wrong in a TP implementation, so it gets a direct
+test (the bias is a full copy and its gradient matches the reference in full, not as a slice) plus
+two mutations (bias added before the reduction; bias split instead of replicated).
