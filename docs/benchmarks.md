@@ -113,7 +113,9 @@ the basic version. That is the argument for vocab-parallel embeddings.
 ## Not measured: everything requiring a GPU
 
 No GPU figure appears anywhere in this repository. The harness, the configs and the baseline store
-all exist, so each of these is a command rather than new work:
+all exist, so each of these is a command rather than new work — and they are bundled into
+`scripts/gpu_verify.sh`, with [`scripts/colab_gpu_verify.ipynb`](../scripts/colab_gpu_verify.ipynb)
+wrapping it for Colab:
 
 | Comparison (SCOPE.md §9) | Command | Needs |
 |---|---|---|
@@ -124,6 +126,11 @@ all exist, so each of these is a command rather than new work:
 | PyTorch reference vs Triton kernel | `benchmarks.kernels` | 1 NVIDIA GPU + Triton |
 | Sequence lengths and micro-batch sizes | `--set model.seq_len=... --set train.micro_batch_size=...` | any GPU |
 | Profiler traces | not yet wired; `torch.profiler` is a dependency and the harness is the place for it | any GPU |
+
+Note that **Colab cannot cover the two-GPU rows** — it provides one GPU per runtime. Those need a
+2-GPU machine (Kaggle's free `T4 x2`, or a rented instance), where `gpu_verify.sh` runs its
+multi-GPU section automatically. And **a T4 has no bf16 at all** (sm_75), so the FP32-vs-BF16 row
+needs an L4 or A100.
 
 Two expectations recorded **in advance**, so that measuring them is not mistaken for finding a bug:
 

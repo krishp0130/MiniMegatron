@@ -27,7 +27,9 @@ checklist items, add a session-log entry, and rewrite "Next up". Scope lives in
 
 ## Next up
 
-The project is wrapped. What is left needs hardware, and none of it needs new code:
+The project is wrapped. What is left needs hardware, and none of it needs new code — it is
+packaged into **`scripts/gpu_verify.sh`**, with **`scripts/colab_gpu_verify.ipynb`** wrapping it
+for Colab (clone, install, run, download results):
 
 | Pending | Command | Needs |
 |---|---|---|
@@ -39,9 +41,16 @@ The project is wrapped. What is left needs hardware, and none of it needs new co
 | FP32 vs BF16 (M3) | `--set train.precision=bf16` | **Ampere+** (a T4 is sm_75, no bf16) |
 | TP vs DDP vs FSDP (M4) | `benchmarks.run` ×3 | 2 GPUs, ideally ± NVLink |
 
+**Colab covers only part of it.** It provides **one GPU per runtime**, so the 1-vs-2-GPU,
+DDP-vs-FSDP-vs-TP and peak-memory rows (DoD #4, #5) need a 2-GPU machine — Kaggle's free `T4 x2`,
+or a rented instance — where `gpu_verify.sh` runs its multi-GPU section automatically. And a **T4
+is sm_75 with no bf16 at all**, so FP32-vs-BF16 needs an L4 or A100; on a T4 the project errors
+clearly instead of silently changing numerics.
+
 Expect the kernel's first real run to surface bugs; that is the normal outcome for code written
 without ever executing it, and the suite is arranged so they land as test failures rather than as
-silently wrong training.
+silently wrong training. If they fail, that *is* the result — record it and fix the kernel, rather
+than reporting the benchmarks that ran anyway.
 
 Deferred by choice, in the order worth doing them:
 1. Vocab-parallel embedding and cross-entropy — the largest remaining TP memory win (84% of the
@@ -216,6 +225,31 @@ produced them.
 ## Session log
 
 Newest first.
+
+### 2026-11-08 — GPU verification packaged for Colab
+
+The owner asked that anything needing NVIDIA hardware go through Colab. Two constraints make that
+a partial answer, and both are now stated wherever the GPU work is mentioned rather than discovered
+later:
+
+- **Colab provides one GPU per runtime**, so DoD #4 and #5 (1-vs-2-GPU throughput, DDP vs FSDP vs
+  TP, peak memory per rank) cannot be done there at all. They need a 2-GPU machine — Kaggle's free
+  `T4 x2`, or a rented instance.
+- **A T4 is sm_75 and has no bf16**, so the FP32-vs-BF16 comparison needs an L4 or A100.
+
+Built `scripts/gpu_verify.sh`: one script running the Triton kernel tests, the full suite,
+single-GPU training, the kernel benchmark (forward and backward), FP32 throughput, and
+FP32-vs-BF16 where supported — plus a multi-GPU section that runs automatically when it sees two
+or more devices, so the same script serves Colab, Kaggle and a rented box. It refuses with exit 2
+and an explanation when there is no GPU, which was verified here.
+
+`scripts/colab_gpu_verify.ipynb` wraps it: GPU identification (printing arch and bf16 support so
+the runtime choice is deliberate), a token-based clone with a zip-upload fallback since the repo is
+private, the pinned-torch install with a note about Colab's restart prompt, the kernel tests on
+their own as the headline, then the script, then result collection and download.
+
+The notebook says plainly that **the kernel tests are expected to fail on their first ever run**,
+and that a failure is the result to record rather than something to work around.
 
 ### 2026-11-08 — End-to-end verification (two real bugs found and fixed)
 

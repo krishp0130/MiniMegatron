@@ -185,6 +185,31 @@ including the 2-process gloo tests, on every push.
 Multi-GPU (NCCL) and Triton results are **pending verification on NVIDIA hardware** until
 explicitly recorded in `results/`.
 
+### Running the GPU-gated work
+
+Everything that needs CUDA is packaged into one script, so a GPU session is copy-paste:
+
+```bash
+bash scripts/gpu_verify.sh      # refuses clearly, exit 2, with no GPU
+```
+
+It runs the Triton kernel tests, the full suite, single-GPU training, the kernel benchmark
+(forward and backward), FP32 throughput, and FP32-vs-BF16 where the GPU supports bf16 — and on a
+2-GPU machine it additionally runs the DDP/FSDP/TP comparisons.
+
+For Google Colab, [`scripts/colab_gpu_verify.ipynb`](scripts/colab_gpu_verify.ipynb) handles the
+clone, the install and the run. Two caveats it states up front:
+
+- **Colab gives one GPU per runtime**, so the 1-vs-2-GPU, DDP-vs-FSDP-vs-TP and
+  peak-memory-per-rank comparisons (DoD #4, #5) cannot be done there. Those need a 2-GPU
+  machine — Kaggle's free `T4 x2`, or a rented instance — where the same script's multi-GPU
+  section runs automatically.
+- **A T4 is sm_75 and has no bf16 at all**, so FP32-vs-BF16 needs an L4 or A100 runtime. On a T4
+  the project errors clearly rather than silently changing numerics, which the script confirms.
+
+Expect the kernel tests to **fail on their first ever run** — that code has never executed
+(ISSUES #16), and finding bugs is the point.
+
 ## Environment notes
 
 ### macOS, for multi-process runs
