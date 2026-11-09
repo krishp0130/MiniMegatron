@@ -18,12 +18,13 @@ harness.
 | 2. Distributed data parallel | DDP, gradient sync validation, rank-aware logging | **done** (benchmarks pending GPU) |
 | 3. Memory optimization | BF16, FSDP2, sharded checkpoints, memory measurements | **done** (memory numbers pending GPU) |
 | 4. Tensor parallelism | Megatron-style column/row-parallel MLP and attention | **done** (benchmarks pending GPU) |
-| 5. GPU kernel optimization | Triton RMSNorm, forward and backward, benchmarks | **partial** — tests, dispatch and fallback done; **kernel written but never executed** (ISSUES #16) |
+| 5. GPU kernel optimization | Triton RMSNorm, forward and backward, benchmarks | **done** — verified on a Tesla T4: 68 tests pass, **3.4–3.7x** faster forward than the reference |
 | 6. Reliability engineering | Regression and distributed tests, failure injection, CI | **done** |
 | 7. Documentation | Architecture, experiments, results tables | **done** |
 
-**455 tests pass on CPU** (37 skipped, all needing CUDA). **60 deliberate bugs injected across
-the six milestones; 59 caught** by the suite.
+**376 tests pass on CPU**; **484 passed on 2x Tesla T4**. **60 deliberate bugs injected across
+the milestones; 59 caught.** The Triton kernel has run on real hardware and works — see
+[measured results](docs/PROGRESS.md#measured-results).
 
 ## Documentation
 
@@ -167,11 +168,12 @@ including the 2-process gloo tests, on every push.
 .venv/bin/python -m minimegatron.benchmarks.kernels
 ```
 
-> **The Triton kernel has never been executed.** It is written, but there is no NVIDIA GPU on the
-> development machine and Triton has no macOS wheels, so it is *unverified code*. The PyTorch
-> reference, the test suite that will judge the kernel, and the backend dispatch are all tested;
-> the 34 Triton-parameterized tests skip. See [ISSUES #16](docs/ISSUES.md) for what closing it
-> requires. An explicit `norm_backend: triton` fails fast rather than falling back silently.
+> **Verified on a Tesla T4** (2026-11-09): the 34 Triton-parameterized tests that skip on a
+> CPU-only machine all pass, and the fused kernel is **3.4–3.7x** faster than the PyTorch
+> reference on the forward pass at ~235 GB/s — roughly 73% of the T4's peak bandwidth, which is
+> the right target for a memory-bound op. No kernel bugs were found on its first ever execution.
+> On a machine without Triton the tests skip and an explicit `norm_backend: triton` fails fast
+> rather than falling back silently.
 
 ## Hardware support
 
@@ -204,11 +206,14 @@ clone, the install and the run. Two caveats it states up front:
   peak-memory-per-rank comparisons (DoD #4, #5) cannot be done there. Those need a 2-GPU
   machine — Kaggle's free `T4 x2`, or a rented instance — where the same script's multi-GPU
   section runs automatically.
-- **A T4 is sm_75 and has no bf16 at all**, so FP32-vs-BF16 needs an L4 or A100 runtime. On a T4
-  the project errors clearly rather than silently changing numerics, which the script confirms.
+- **A T4 has no *native* bf16** (sm_75). It still runs — torch counts emulated bf16, so
+  `precision: bf16` is permitted — but it is **slower** than fp32 there (measured: 23,438 vs
+  29,648 tokens/s). The FP32-vs-BF16 *speedup* needs an L4 or A100. An earlier version of this
+  README claimed a T4 would error on bf16; it does not (ISSUES #21).
 
-Expect the kernel tests to **fail on their first ever run** — that code has never executed
-(ISSUES #16), and finding bugs is the point.
+The kernel tests **passed on their first ever run** on a T4 x2 (ISSUES #16 closed). That run did
+find three other bugs the CPU-only suite could not: tensor-parallel layers built on the CPU
+(#19), three tests encoding "no GPU here" as an invariant (#20), and the bf16 claim above (#21).
 
 ## Environment notes
 
@@ -285,16 +290,17 @@ fabricate test results."*
 | # | Criterion | Status |
 |---|---|---|
 | 1 | A GPT model trains and reduces loss on a small task | **met** — overfit test drives loss from ≈ln V to < 0.1 |
-| 2 | CPU-safe correctness tests pass | **met** — 455 passed, 37 skipped |
-| 3 | Single-GPU training works on CUDA | **pending hardware** — code paths exist and error clearly; never run |
-| 4 | DDP trains correctly across two GPUs, gradients verified | **gradients verified** on 2 gloo CPU ranks against a single-process reference; **two-GPU NCCL run pending** |
-| 5 | FSDP2 trains correctly with valid checkpointing | **correctness and checkpointing verified** on 2 gloo CPU ranks (DCP round trip, resume, consolidation); **two-GPU run pending** |
-| 6 | TP=2 matches the single-device reference in forward and gradients | **met** on 2 gloo CPU ranks — sharded gradients match the reference slice, replicated ones match in full |
-| 7 | A Triton kernel passes numerical and gradient tests | **not met** — the kernel has never executed (ISSUES #16). 34 tests are written and skip |
+| 2 | CPU-safe correctness tests pass | **met** — 376 passed, 37 skipped |
+| 3 | Single-GPU training works on CUDA | **met** — 20 steps on a Tesla T4, 29,648 tokens/s |
+| 4 | DDP trains correctly across two GPUs, gradients verified | **met** — gradients verified against a single-process reference on gloo; measured on 2x T4 at **1.77x** scaling |
+| 5 | FSDP2 trains correctly with valid checkpointing | **met** — correctness, DCP round trip, resume and consolidation on gloo; measured on 2x T4 |
+| 6 | TP=2 matches the single-device reference in forward and gradients | **met** on 2 gloo ranks — sharded gradients match the reference slice, replicated ones match in full. The **2-GPU** run awaits a re-run after ISSUES #19 |
+| 7 | A Triton kernel passes numerical and gradient tests | **met** — 68 passed on a Tesla T4, no kernel bugs found |
 | 8 | Automated validation catches deliberately introduced errors | **met** — 60 mutations injected, 59 caught |
-| 9 | Benchmark results reproducible from documented configs | **met for the CPU results**; GPU results do not exist yet |
-| 10 | Performance claims cite measured configurations | **met** — and no GPU performance claim is made anywhere |
-| 11 | Documented well enough for another engineer to run it | **met** — this README, six documents, and a design doc per milestone |
+| 9 | Benchmark results reproducible from documented configs | **met** — `scripts/gpu_verify.sh` produced every GPU figure recorded |
+| 10 | Performance claims cite measured configurations | **met** — every number names its hardware, commit and method |
+| 11 | Documented well enough for another engineer to run it | **met** — verified by a cold install, and by this GPU run following the documented path |
 
-Four of the eleven depend on NVIDIA hardware. Nothing in this repository claims otherwise, and no
-number appears that was not measured on the machine named beside it.
+**Ten of eleven fully met.** Criterion 6's two-GPU measurement is the single outstanding item,
+pending a re-run after the fix for ISSUES #19. No number appears here that was not measured on the
+machine named beside it.

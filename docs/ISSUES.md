@@ -6,29 +6,17 @@ the fix rather than deleting them.
 
 ## Open issues
 
-### #16 — The Triton RMSNorm kernel has NEVER BEEN EXECUTED
-- **Status:** open (blocked on hardware)
-- **Detail:** `kernels/rmsnorm.py` contains a fused forward kernel and a `dx` backward kernel
-  written for Triton. **Neither has ever run.** There is no NVIDIA GPU on this machine and Triton
-  has no macOS wheels (#3), so the code has been type-checked by nothing stronger than reading it.
-  It is unverified code, not working code, and no document in this project may say otherwise.
-- **What *is* verified:** the PyTorch reference (`rms_norm`, written in M1 for this purpose) across
-  8 shapes, 3 dtypes, extreme inputs and a float64 gradcheck; the eps handling; the backend
-  dispatch and fallback; and that an explicit `norm_backend: triton` fails fast here rather than
-  falling back silently. 34 Triton-parameterized tests exist and **skip**, stating the reason.
-- **To close:** run `pytest tests/kernels -q` on a Linux + NVIDIA machine. The tests are
-  parameterized over backend, so the kernel is judged by the reference's own assertions with no
-  new test code. Then `python -m minimegatron.benchmarks.kernels` for the runtime and bandwidth
-  comparison. Expect the first run to surface real bugs; that is the normal outcome for a kernel
-  written blind.
-
 ### #3 — No NVIDIA GPU on the development machine
-- **Status:** open (environmental)
+- **Status:** open (environmental; partially mitigated — see below)
 - **Impact:** CUDA, NCCL, BF16-on-GPU, Triton (Milestone 5), and every GPU benchmark cannot be run
   locally. Triton does not install on macOS.
 - **Plan:** develop and verify correctness on CPU (gloo for multi-process). Run GPU verification
   and benchmarks on a rented Linux + NVIDIA machine (1 GPU for Triton/BF16, 2 GPUs for
   DDP/FSDP/TP scaling). All GPU results stay marked *pending* in PROGRESS.md until measured.
+- **Mitigated 2026-11-09:** a Kaggle `T4 x2` session ran `scripts/gpu_verify.sh` and produced the
+  measurements now recorded in PROGRESS.md. It closed #16 and found #19, #20 and #21. The GPU
+  there is sm_75, so the **FP32-vs-BF16 speedup** still needs Ampere or newer; everything else is
+  measured. The gap this issue describes is now one row, not a milestone.
 
 ### #10 — Autocast leaves the residual stream in FP32, so BF16 losses barely move
 - **Status:** open (documented behaviour, not a bug)
@@ -48,6 +36,69 @@ the fix rather than deleting them.
   verify a precision mode by the dtype at each op, never by whether the loss changed.
 
 ## Resolved issues
+
+### #16 — The Triton RMSNorm kernel had never been executed
+- **Status:** **resolved 2026-11-09** — it has now run, and it works.
+- **History:** the kernel was written in Milestone 5 without an NVIDIA GPU to run it on (#3), so it
+  shipped as *unverified code*. 34 Triton-parameterized tests existed and skipped. Every document
+  said so plainly rather than implying the kernel worked.
+- **Verification:** Kaggle `T4 x2`, torch 2.11.0+cu130, triton 3.6.0, source at commit `010ee80`.
+  `pytest tests/kernels` went from *38 passed, 34 skipped* on CPU to **68 passed, 4 skipped** —
+  roughly 30 previously-skipped comparisons executed, covering forward and both gradients across 8
+  shapes (including non-powers-of-two 192/193/33), 3 dtypes, non-contiguous inputs, 3-D
+  activations, extreme magnitudes and eps handling. **No kernel bugs were found.**
+- **Performance** (float32, Tesla T4, peak bandwidth 320 GB/s): forward **3.39–3.66x** faster than
+  the PyTorch reference at ~230 GB/s, i.e. **~73% of theoretical peak** for a memory-bound op.
+  Forward+backward **2.74x** at 768 and 1024 columns, but only **1.07x** at 192 columns — launch
+  overhead plus `dw` staying in PyTorch, exactly the trade D31 described.
+- The one test that failed in that run was a *test* bug, not the kernel (#20).
+
+### #21 — `torch.cuda.is_bf16_supported()` returns True on a T4
+- **Status:** resolved (documentation error), 2026-11-09
+- **Symptom:** this project repeatedly stated that a T4 "has no bf16 at all" and that
+  `precision: bf16` would be a hard error there. The first GPU run printed `bf16 True` on a Tesla
+  T4 (sm_75), and a bf16 benchmark ran to completion.
+- **Cause:** recent torch counts **emulated** bf16, so `is_bf16_supported()` is True on sm_75 even
+  though the hardware has no bf16 tensor cores. `validate_precision` consults that function, so it
+  permits bf16 — correctly, since the maths is fine.
+- **What is actually true:** bf16 *runs* on a T4 and is *slower* than fp32 — measured 23,438 vs
+  29,648 tokens/s — while still saving memory (1,660 vs 1,862 MiB). The speedup needs Ampere or
+  newer. The honest statement is "no native bf16, so no speedup", not "no bf16".
+- Every claim to the contrary has been corrected in the README, `benchmarks.md`, the M5 design doc
+  and the Colab notebook.
+
+### #20 — Three tests encoded "there is no GPU here" as a fact
+- **Status:** resolved, 2026-11-09
+- **Symptom:** the first GPU run produced 3 failures out of 487, and **all three were tests, not
+  code**:
+  - `test_auto_falls_back_to_the_reference_without_triton` asserted `resolve_norm_backend("auto",
+    device=cpu) == "triton"` whenever Triton was merely *installed* — ignoring its own device
+    argument. A CPU tensor must never be routed to the GPU kernel, so the code was right.
+  - `test_collectives_demo_runs_under_torchrun` failed because the demo all-reduced **CPU**
+    tensors. gloo accepts that; **nccl does not**, and `backend: auto` resolves to nccl on CUDA.
+    That one was a real bug in the demo, now fixed by following the backend onto the device.
+  - `test_setup_errors_exit_cleanly[Triton is not installed]` asserted an error that only occurs
+    when Triton is absent; it now skips when Triton is present.
+- **Lesson:** a test written on a machine that lacks a capability can silently encode the lack as
+  an invariant. These could only ever fail on hardware the author did not have — which is an
+  argument for running the suite somewhere unlike the development machine *before* calling it
+  done, not after.
+
+### #19 — Tensor-parallel layers were built on the CPU regardless of the model's device
+- **Status:** resolved, 2026-11-09
+- **Symptom:** on 2 GPUs, every tensor-parallel run died inside the first matmul with
+  `mat1 is on cuda:1, different from other tensors on cpu`. DDP and FSDP were unaffected.
+- **Cause:** `ColumnParallelLinear.__init__` and `RowParallelLinear.__init__` allocated their
+  shards with `torch.empty(...)` and **no `device=` argument**, so surgery replaced GPU layers with
+  CPU ones while the embeddings, norms and LM head stayed on the GPU. On a CPU-only machine every
+  tensor is on the CPU, so the bug was perfectly invisible — all 89 distributed tests passed.
+- **Fix:** both constructors now take `device`/`dtype` like `nn.Linear`, and `from_linear` passes
+  the device and dtype of the layer it replaces. `Trainer` additionally calls
+  `assert_single_device` after surgery, so a future slip fails at construction naming the offending
+  parameters rather than deep inside a matmul.
+- **Regression test on a CPU-only machine:** `dtype` travels through exactly the same factory
+  arguments as `device`, so asserting that a float64 or bf16 source layer yields a float64/bf16
+  shard pins the device path too. Confirmed by reintroducing the original defect: 2 tests fail.
 
 ### #18 — The CLI leaked tracebacks for setup errors
 - **Status:** resolved, 2026-11-08

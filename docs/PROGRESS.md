@@ -6,59 +6,35 @@ checklist items, add a session-log entry, and rewrite "Next up". Scope lives in
 
 ## Current state
 
-- **All seven milestones addressed.** M1–M4, M6 and M7 are complete. M5 is complete except for the
-  kernel itself, which is **written but has never been executed** (ISSUES #16) — there is no NVIDIA
-  GPU on this machine.
-- **Remaining work is hardware-gated, not unwritten.** Four of SCOPE.md §13's eleven
-  Definition-of-Done criteria need NVIDIA GPUs; see the table in the README and the commands in
-  [benchmarks.md](../docs/benchmarks.md). The harness, configs, baseline store and
-  backend-parameterized kernel tests all exist, so each pending item is a command.
-- **Last updated:** 2026-11-08
-- **Test status:** 463 passed, 37 skipped (`pytest -q`, CPU, ~125 s). By suite: 261 unit, 89
-  distributed (two-process gloo), 73 kernels, 34 fault-injection, 31 numerical, 12 regression.
-  All 37 skips need CUDA hardware; 34 of them are the Triton-parameterized kernel tests
-  (ISSUES #16).
-- **Verified from a cold install:** a fresh venv that had never seen this project installs with
-  `pip install -e ".[dev]"` and runs the full suite to the same result.
-- **CI is passing, not merely configured.** Recent GitHub Actions runs on `main`:
-  `42536192235` (M7, 6m39s), `42532323921` (M5, 7m37s), `42525629959` (M6, 8m28s) — all success.
-- **Verified hardware:** Apple M4 Pro (CPU + MPS), 2-process gloo. No NVIDIA GPU verification yet.
-- **CI:** GitHub Actions runs the CPU-safe suite — the gloo tests included — on every push.
+- **All seven milestones complete.** M5's Triton kernel has now **run on real hardware and
+  passed** (ISSUES #16 closed), so nothing is left unverified for want of a GPU except one row.
+- **Verified on NVIDIA hardware 2026-11-09**: Kaggle `T4 x2` (2x Tesla T4, sm_75), torch
+  2.11.0+cu130, triton 3.6.0, source at `010ee80`. Measured results below.
+- **That run found three real bugs** the CPU-only suite could not: TP layers built on the CPU
+  (#19), three tests encoding "no GPU here" as an invariant (#20), and a documentation error about
+  bf16 on a T4 (#21). All fixed.
+- **Last updated:** 2026-11-09
+- **Test status:** 468 passed, 37 skipped on CPU (`pytest -q`, ~2 min); **484 passed, 3 failed,
+  13 skipped on the T4 x2** before the fixes — all three failures were the tests of #20.
+- **Verified hardware:** Apple M4 Pro (CPU + MPS), 2-process gloo; Kaggle 2x Tesla T4 (NCCL).
+- **CI:** GitHub Actions runs the CPU-safe suite on every push; recent runs `42536192235` (6m39s),
+  `42532323921` (7m37s), `42525629959` (8m28s), `42538421796` (7m9s) — all success.
 
 ## Next up
 
-The project is wrapped. What is left needs hardware, and none of it needs new code — it is
-packaged into **`scripts/gpu_verify.sh`**, with **`scripts/colab_gpu_verify.ipynb`** wrapping it
-for Colab (clone, install, run, download results):
+Only two things remain, and neither is large:
 
-| Pending | Command | Needs |
-|---|---|---|
-| Triton kernel correctness (ISSUES #16) | `pytest tests/kernels -q` | 1 NVIDIA GPU |
-| Triton vs reference runtime/bandwidth | `python -m minimegatron.benchmarks.kernels` | 1 NVIDIA GPU |
-| Single-GPU training (DoD #3) | `python -m minimegatron.train --config configs/tiny.yaml` | 1 NVIDIA GPU |
-| 1 vs 2 GPU throughput (DoD #4) | `benchmarks.run` ×2 | 2 NVIDIA GPUs |
-| Peak memory, DDP vs FSDP (M3) | `benchmarks.run` with `*_2gpu.yaml` | 2 NVIDIA GPUs |
-| FP32 vs BF16 (M3) | `--set train.precision=bf16` | **Ampere+** (a T4 is sm_75, no bf16) |
-| TP vs DDP vs FSDP (M4) | `benchmarks.run` ×3 | 2 GPUs, ideally ± NVLink |
-
-**Colab covers only part of it.** It provides **one GPU per runtime**, so the 1-vs-2-GPU,
-DDP-vs-FSDP-vs-TP and peak-memory rows (DoD #4, #5) need a 2-GPU machine — Kaggle's free `T4 x2`,
-or a rented instance — where `gpu_verify.sh` runs its multi-GPU section automatically. And a **T4
-is sm_75 with no bf16 at all**, so FP32-vs-BF16 needs an L4 or A100; on a T4 the project errors
-clearly instead of silently changing numerics.
-
-Expect the kernel's first real run to surface bugs; that is the normal outcome for code written
-without ever executing it, and the suite is arranged so they land as test failures rather than as
-silently wrong training. If they fail, that *is* the result — record it and fix the kernel, rather
-than reporting the benchmarks that ran anyway.
+| Pending | Needs |
+|---|---|
+| **FP32 vs BF16 speedup** (M3) | **Ampere or newer.** A T4 is sm_75: bf16 runs but is *slower* than fp32 (measured), because it is emulated. An L4/A100 session would take minutes. |
+| **Tensor parallelism on 2 GPUs** | A re-run of `scripts/gpu_verify.sh` now that #19 is fixed. The TP section was the only one that failed; DDP and FSDP are measured. |
 
 Deferred by choice, in the order worth doing them:
-1. Vocab-parallel embedding and cross-entropy — the largest remaining TP memory win (84% of the
-   tiny preset's parameters are a replicated token table).
+1. Vocab-parallel embedding and cross-entropy — the largest remaining TP memory win.
 2. A model-parallel RNG tracker, which unblocks dropout under TP (D18).
 3. Real text data and sampling (`data/text.py`, an M1 stretch item).
 4. 2D TP+DP composition — the `(dp, tp)` mesh and the strategy switch are the seams for it.
-5. Profiler traces through the benchmark harness (`torch.profiler` is already a dependency).
+5. Profiler traces through the benchmark harness.
 
 ## Milestone checklist
 
@@ -114,18 +90,18 @@ Deferred by choice, in the order worth doing them:
 - [x] [`docs/tensor_parallel.md`](../docs/tensor_parallel.md)
 - [ ] TP vs DDP vs FSDP benchmarks *(pending hardware)*
 
-### Milestone 5 — Triton kernels *(partial: kernel unverified, ISSUES #16)*
+### Milestone 5 — Triton kernels ✅ *(verified on a Tesla T4, 2026-11-09)*
 - [x] Milestone scoped ([M5_triton.md](milestones/M5_triton.md))
 - [x] RMSNorm PyTorch reference (written in M1 for exactly this)
-- [x] Triton forward kernel + `dx` backward kernel — **written, NEVER EXECUTED**
+- [x] Triton forward kernel + `dx` backward kernel — **verified: 68 tests pass on a T4**
 - [x] Explicit autograd strategy: Triton `dx`, PyTorch `dw`, documented as a decision (D31)
 - [x] Numerical + gradient tests across shapes/dtypes/extremes, parameterized over backend —
       the reference passes; the 34 Triton parameters skip, stating why
 - [x] float64 `gradcheck` of the reference
 - [x] Config switch `model.norm_backend: auto|pytorch|triton` with no silent fallback (D32)
 - [x] Kernel benchmark CLI (`benchmarks.kernels`), which refuses clearly without a GPU
-- [ ] Triton numerical equivalence vs the reference *(pending hardware)*
-- [ ] Kernel runtime/bandwidth measurements *(pending hardware)*
+- [x] Triton numerical equivalence vs the reference — no kernel bugs found
+- [x] Kernel runtime/bandwidth measurements — 3.4-3.7x forward, ~73% of peak bandwidth
 
 ### Milestone 6 — Reliability engineering ✅
 - [x] Milestone scoped ([M6_reliability.md](milestones/M6_reliability.md))
@@ -151,6 +127,54 @@ Deferred by choice, in the order worth doing them:
 
 ## Measured results
 
+### GPU (measured 2026-11-09)
+
+**Kaggle `T4 x2`** — 2x Tesla T4 (sm_75, 320 GB/s peak bandwidth each), torch 2.11.0+cu130,
+triton 3.6.0, source `010ee80`. 3 warmup steps discarded, 3 repeats of 10 steps, median reported.
+
+**Triton RMSNorm vs the PyTorch reference** (float32), the Milestone 5 claim:
+
+| rows x cols | direction | reference | Triton | speedup | GB/s |
+|---|---|---|---|---|---|
+| 4096 x 192 | fwd | 0.114 ms | 0.073 ms | 1.56x | 87 |
+| 4096 x 768 | fwd | 0.405 ms | 0.111 ms | **3.66x** | 228 |
+| 4096 x 1024 | fwd | 0.526 ms | 0.146 ms | **3.61x** | 230 |
+| 16384 x 768 | fwd | 1.475 ms | 0.430 ms | **3.43x** | 234 |
+| 16384 x 2048 | fwd | 3.894 ms | 1.148 ms | **3.39x** | 234 |
+| 65536 x 768 | fwd | 5.839 ms | 1.707 ms | **3.42x** | 236 |
+| 4096 x 192 | fwd+bwd | 0.511 ms | 0.476 ms | 1.07x | 13 |
+| 4096 x 768 | fwd+bwd | 1.663 ms | 0.606 ms | **2.74x** | 41 |
+| 4096 x 1024 | fwd+bwd | 2.163 ms | 0.791 ms | **2.74x** | 42 |
+
+~235 GB/s is **about 73% of the T4's theoretical peak**, which is the right target for an op whose
+cost is entirely memory traffic. The narrow 192-column rows barely improve (1.07x on fwd+bwd):
+launch overhead dominates, and `dw` stays in PyTorch by design (D31). The widening gap from 192 to
+768 columns is the fusion paying off exactly where it should.
+
+**End-to-end training** (tiny preset, `micro=8`):
+
+| Label | Strategy | Precision | GPUs | tokens/s | peak allocated |
+|---|---|---|---|---|---|
+| gpu-fp32 | single | fp32 | 1 | 29,648 | 1,862 MiB |
+| gpu-bf16 | single | bf16 | 1 | 23,438 | 1,660 MiB |
+| gpu-ddp-2 | ddp | fp32 | 2 | **52,493** | 1,906 MiB |
+| gpu-fsdp-2 | fsdp | fp32 | 2 | 51,925 | 1,834 MiB |
+
+Three things worth reading off this table:
+
+- **1 to 2 GPUs: 1.77x** (29,648 to 52,493 tokens/s). Real scaling, on real hardware — the claim
+  Milestone 2 could only make structurally before.
+- **FSDP costs 1.1% throughput and saves 72 MiB** against DDP at this size. The direction is right
+  (more collectives, less memory) but the tiny preset is far too small for sharding to pay; the
+  interesting comparison needs a model that does not comfortably fit.
+- **bf16 is *slower* than fp32 here** (23,438 vs 29,648) while saving 202 MiB. A T4 is sm_75 and
+  emulates bf16 — see ISSUES #21, which corrects an earlier claim in these docs that bf16 would
+  error on a T4. It does not; it runs, without the speedup.
+
+Tensor parallelism is **absent from this table** because it failed on the first GPU run (ISSUES
+#19 — the parallel layers were built on the CPU). Fixed, but not yet re-measured.
+
+### CPU throughput (measured, Milestone 6)
 ### CPU throughput (measured, Milestone 6)
 
 First recorded numbers. tiny preset, Apple M4 Pro **CPU**, commit `7b8313e`, 3 warmup steps
@@ -225,6 +249,53 @@ produced them.
 ## Session log
 
 Newest first.
+
+### 2026-11-09 — GPU verification on Kaggle T4 x2: #16 closed, three bugs found
+
+Ran `scripts/gpu_verify.sh` on a Kaggle `T4 x2` session (2x Tesla T4, sm_75; torch 2.11.0+cu130;
+triton 3.6.0; source `010ee80`). The first time any of this code has touched NVIDIA hardware.
+
+**ISSUES #16 is closed: the Triton kernel works.** `pytest tests/kernels` went from *38 passed,
+34 skipped* on CPU to **68 passed, 4 skipped** — about 30 previously-skipped comparisons executed,
+covering forward and both gradients across 8 shapes, 3 dtypes, non-contiguous inputs, 3-D
+activations and eps handling. **No kernel bugs.** I had expected some, and said so repeatedly; the
+expectation was wrong and the discipline of writing it down in advance is what makes that
+checkable.
+
+Measurements are in "Measured results" above. The headline numbers: **3.39–3.66x** faster forward
+than the PyTorch reference at ~235 GB/s (**~73% of the T4's peak bandwidth**), **1.77x** scaling
+from 1 to 2 GPUs, and FSDP costing 1.1% throughput for 72 MiB against DDP.
+
+**The run found three real bugs that 60 mutations and 463 CPU tests had all missed**, every one of
+them invisible without the hardware:
+
+- **ISSUES #19 — tensor-parallel layers were built on the CPU.** Every TP run on 2 GPUs died with
+  `mat1 is on cuda:1, different from other tensors on cpu`. `ColumnParallelLinear.__init__` used
+  `torch.empty(...)` with no `device=`, so surgery replaced GPU layers with CPU ones. On a CPU-only
+  machine *every tensor is on the CPU*, so all 89 distributed tests passed. Fixed by forwarding
+  `device`/`dtype` like `nn.Linear`, plus an `assert_single_device` guard that now fails at
+  construction naming the offending parameters. The regression test pins **dtype**, which travels
+  through the same factory arguments — so it catches the bug on a CPU-only machine, confirmed by
+  reintroducing the defect.
+- **ISSUES #20 — three tests encoded "there is no GPU here" as a fact.** One asserted
+  `resolve_norm_backend("auto", device=cpu) == "triton"` whenever Triton was merely installed,
+  ignoring its own device argument. One failed because the collectives demo all-reduces **CPU**
+  tensors, which gloo accepts and **nccl rejects** — a real bug in the demo, since `backend: auto`
+  picks nccl on CUDA. One asserted an error that only occurs when Triton is absent.
+- **ISSUES #21 — the bf16-on-T4 claim in these docs was wrong.** I had written repeatedly that a
+  T4 "has no bf16 at all" and that the project would error on it. `torch.cuda.is_bf16_supported()`
+  returns **True** on sm_75 because recent torch counts *emulated* bf16, so it runs — and is
+  **slower** than fp32 (23,438 vs 29,648 tokens/s) while saving 202 MiB. Corrected in the README,
+  `benchmarks.md`, the M5 design doc, `gpu_verify.sh` and the Colab notebook.
+
+**The shape of the gap is the lesson.** Mutation testing probes code the tests already reach; the
+end-to-end pass probed the seams between units. Neither could probe a *capability the machine
+lacked* — and all three of these bugs lived exactly there. A suite written on hardware unlike the
+target encodes that hardware's limits as invariants, quietly.
+
+Tensor parallelism is still unmeasured on 2 GPUs: it was the one section that failed, and the fix
+has not been re-run on hardware. That is now the only outstanding item besides the FP32-vs-BF16
+speedup, which needs Ampere or newer.
 
 ### 2026-11-08 — GPU verification packaged for Colab
 

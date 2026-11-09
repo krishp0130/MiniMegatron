@@ -280,12 +280,15 @@ def test_pytorch_backend_always_resolves():
     assert resolve_norm_backend("pytorch", torch.device("cpu")) == "pytorch"
 
 
-def test_auto_falls_back_to_the_reference_without_triton():
-    expected = "triton" if triton_usable() else "pytorch"
-    assert resolve_norm_backend("auto") == expected
-    assert resolve_norm_backend("auto", torch.device("cpu")) == (
-        "triton" if triton_usable() else "pytorch"
-    )
+def test_auto_resolves_per_device_not_just_per_machine():
+    """`auto` depends on the *tensor's* device, not merely on whether Triton is installed.
+
+    The earlier version of this test asserted `triton` whenever `triton_usable()` was true, while
+    passing `device=cpu` -- so it could only fail on a CUDA machine, and did (ISSUES #20). A CPU
+    tensor must never be routed to the GPU kernel.
+    """
+    assert resolve_norm_backend("auto") == ("triton" if triton_usable() else "pytorch")
+    assert resolve_norm_backend("auto", torch.device("cpu")) == "pytorch"
 
 
 @pytest.mark.skipif(triton_usable(), reason="Triton is usable here, so this would not raise")

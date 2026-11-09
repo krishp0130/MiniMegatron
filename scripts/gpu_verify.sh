@@ -12,7 +12,8 @@
 #   DoD #3       single-GPU training works on CUDA
 #   DoD #7       an optimized Triton kernel passes numerical and gradient tests
 #   M5           kernel runtime and bandwidth vs the PyTorch reference
-#   M3 (part)    FP32 vs BF16 -- only on Ampere or newer; a T4 is sm_75 and has NO bf16
+#   M3 (part)    FP32 vs BF16 -- a T4 runs bf16 (emulated) but SLOWER than fp32; the
+#                speedup needs Ampere or newer
 #
 # WHAT IT CANNOT CLOSE
 #   Anything needing TWO GPUs: 1-vs-2-GPU throughput, DDP vs FSDP vs TP, peak memory per rank
@@ -63,7 +64,7 @@ if [ "$BF16" = "True" ]; then
     $PY -m minimegatron.benchmarks.run --config configs/benchmark.yaml \
         --label gpu-bf16 --set train.device=cuda --set train.precision=bf16 || FAIL=1
 else
-    echo "SKIPPED: this GPU has no bf16 (needs compute capability 8.0+, i.e. Ampere or newer)."
+    echo "SKIPPED: torch reports no bf16 on this GPU."
     echo "A T4 is sm_75. The project errors clearly on bf16 here rather than silently changing"
     echo "numerics -- which is itself worth confirming:"
     $PY -m minimegatron.train --config configs/tiny.yaml --set train.max_steps=1 \

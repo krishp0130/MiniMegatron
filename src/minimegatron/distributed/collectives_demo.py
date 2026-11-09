@@ -73,15 +73,23 @@ def main() -> int:
             )
             return 1
 
+        # nccl collectives require CUDA tensors, so the demo must follow the backend onto the
+        # device. Under gloo on CPU this is a no-op; under nccl it is the difference between
+        # working and `no support for CPU tensors` (ISSUES #20).
+        device = (
+            torch.device(f"cuda:{info.local_rank}")
+            if torch.cuda.is_available()
+            else torch.device("cpu")
+        )
         torch.manual_seed(0)  # identical weights on every rank
-        model = GPT(DEMO_CONFIG)
+        model = GPT(DEMO_CONFIG).to(device)
 
         # Each rank takes its own shard of one global batch of 4 * world_size sequences.
         dataset = RandomTokenDataset(DEMO_CONFIG.vocab_size, DEMO_CONFIG.seq_len, 256, seed=0)
         stream = BatchStream(dataset, 4, seed=0, rank=info.rank, world_size=info.world_size)
         x, y = stream.micro_batch(0)
 
-        loss = local_gradients(model, x, y)
+        loss = local_gradients(model, x.to(device), y.to(device))
         probe = model.blocks[0].mlp.fc1.weight  # one parameter, followed all the way through
         before = probe.grad.norm().item()
 
@@ -89,7 +97,7 @@ def main() -> int:
         after = probe.grad.norm().item()
 
         print(
-            f"[rank {info.rank}/{info.world_size}] loss {loss.item():.6f} | "
+            f"[rank {info.rank}/{info.world_size}] {device} | loss {loss.item():.6f} | "
             f"grad norm local {before:.6f} -> averaged {after:.6f}",
             flush=True,
         )

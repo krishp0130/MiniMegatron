@@ -28,6 +28,7 @@ from minimegatron.train import main as train_main
 from minimegatron.training.checkpoint import load_checkpoint, save_checkpoint
 from minimegatron.training.config import TrainConfig
 from minimegatron.training.optimizer import build_optimizer, build_scheduler
+from minimegatron.kernels.rmsnorm import triton_usable as _triton_usable
 from minimegatron.training.trainer import Trainer, resolve_device, validate_precision
 
 TIMEOUT = 300
@@ -369,9 +370,15 @@ def write_config(path, **sections) -> None:
             [],
             "global_batch_size 99",
         ),
-        # Raised by RMSNorm's constructor, via make_norm.
-        ({}, ["--set", "model.norm_type=rmsnorm", "--set", "model.norm_backend=triton"],
-         "Triton is not installed"),
+        # Raised by RMSNorm's constructor, via make_norm. Only when Triton really is absent --
+        # on a GPU machine with Triton installed this is not an error at all (ISSUES #20).
+        pytest.param(
+            {}, ["--set", "model.norm_type=rmsnorm", "--set", "model.norm_backend=triton"],
+            "Triton is not installed",
+            marks=pytest.mark.skipif(
+                _triton_usable(), reason="Triton is installed here, so this is not an error"
+            ),
+        ),
     ],
 )
 def test_setup_errors_exit_cleanly_rather_than_raising(tmp_path, capsys, sections, extra, fragment):

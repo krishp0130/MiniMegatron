@@ -170,6 +170,8 @@ class ColumnParallelLinear(nn.Module):
         bias: bool = True,
         group=None,
         gather_output: bool = False,
+        device=None,
+        dtype=None,
     ) -> None:
         super().__init__()
         size = group_size(group)
@@ -183,8 +185,13 @@ class ColumnParallelLinear(nn.Module):
         self.group = group
         self.gather_output = gather_output
 
-        self.weight = nn.Parameter(torch.empty(self.out_features_per_rank, in_features))
-        self.bias = nn.Parameter(torch.empty(self.out_features_per_rank)) if bias else None
+        # device/dtype are forwarded like nn.Linear's. Omitting them would build the shard on the
+        # CPU regardless of where the model lives -- which is exactly the ISSUES #19 bug.
+        factory = {"device": device, "dtype": dtype}
+        self.weight = nn.Parameter(torch.empty(self.out_features_per_rank, in_features, **factory))
+        self.bias = (
+            nn.Parameter(torch.empty(self.out_features_per_rank, **factory)) if bias else None
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = copy_to_tp_region(x, self.group)  # f
@@ -201,6 +208,8 @@ class ColumnParallelLinear(nn.Module):
             bias=linear.bias is not None,
             group=group,
             gather_output=gather_output,
+            device=linear.weight.device,
+            dtype=linear.weight.dtype,
         )
         with torch.no_grad():
             layer.weight.copy_(linear.weight.chunk(size, dim=0)[rank])
@@ -227,6 +236,8 @@ class RowParallelLinear(nn.Module):
         bias: bool = True,
         group=None,
         input_is_parallel: bool = True,
+        device=None,
+        dtype=None,
     ) -> None:
         super().__init__()
         size = group_size(group)
@@ -238,8 +249,9 @@ class RowParallelLinear(nn.Module):
         self.group = group
         self.input_is_parallel = input_is_parallel
 
-        self.weight = nn.Parameter(torch.empty(out_features, self.in_features_per_rank))
-        self.bias = nn.Parameter(torch.empty(out_features)) if bias else None  # replicated
+        factory = {"device": device, "dtype": dtype}
+        self.weight = nn.Parameter(torch.empty(out_features, self.in_features_per_rank, **factory))
+        self.bias = nn.Parameter(torch.empty(out_features, **factory)) if bias else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not self.input_is_parallel:
@@ -257,6 +269,8 @@ class RowParallelLinear(nn.Module):
             bias=linear.bias is not None,
             group=group,
             input_is_parallel=input_is_parallel,
+            device=linear.weight.device,
+            dtype=linear.weight.dtype,
         )
         with torch.no_grad():
             layer.weight.copy_(linear.weight.chunk(size, dim=1)[rank])
@@ -322,6 +336,24 @@ def parallelize_model(model: nn.Module, group=None) -> nn.Module:
         # `split_qkv` must reshape with the local head count or it will mangle the slice.
         block.attn.n_heads = block.attn.n_heads // size
     return model
+
+
+def assert_single_device(model: nn.Module) -> torch.device:
+    """Every parameter on one device, or raise naming the offenders.
+
+    Surgery builds brand-new parameters, and a factory call that forgets `device=` silently puts
+    them on the CPU while the rest of the model sits on a GPU. On a CPU-only machine that is
+    invisible; on a GPU it fails deep inside a matmul with a message about `mat1` (ISSUES #19).
+    """
+    devices = {name: p.device for name, p in model.named_parameters()}
+    distinct = set(devices.values())
+    if len(distinct) > 1:
+        offenders = sorted(f"{n} on {d}" for n, d in devices.items())[:6]
+        raise RuntimeError(
+            f"model parameters span multiple devices {sorted(map(str, distinct))}: "
+            + ", ".join(offenders)
+        )
+    return next(iter(distinct))
 
 
 # --- gradient clipping ---------------------------------------------------------------------------

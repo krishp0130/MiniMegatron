@@ -13,11 +13,13 @@ is checked against.
 | Reference implementation | done in M1 (`rms_norm`) |
 | Numerical/gradient test suite against the reference | **written and passing locally** |
 | Config switch between PyTorch and Triton | **written and tested locally** |
-| Triton kernels (forward, `dx` backward) | **written, NEVER EXECUTED** |
-| Kernel benchmarks, memory/runtime comparison | *pending hardware* |
-| Triton-vs-reference numerical equivalence | *pending hardware* |
+| Triton kernels (forward, `dx` backward) | **verified on a Tesla T4, 2026-11-09** |
+| Kernel benchmarks, memory/runtime comparison | **measured: 3.4-3.7x forward, ~73% of peak bandwidth** |
+| Triton-vs-reference numerical equivalence | **68 passed, no kernel bugs found** |
 
-**Nothing in this milestone may claim the kernel works.** It has never run. Every Triton test is
+**Update 2026-11-09: the kernel has now run and works** (ISSUES #16). What follows was written
+before that, when nothing in this milestone was permitted to claim the kernel worked, and it is
+left as written because the reasoning is what mattered:  Every Triton test is
 GPU-marked and skips here, and PROGRESS.md records the kernel as unverified until it has executed
 on real hardware. The value delivered locally is everything *around* the kernel: the reference, the
 tests that will judge it, the dispatch that selects it, and the fallback that makes its absence a

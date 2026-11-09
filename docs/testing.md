@@ -5,7 +5,7 @@ QA framework "a critical component"; this is the account of it.
 
 ## Current state
 
-**463 passed, 37 skipped** (`pytest -q`, CPU, ~2 min). All 37 skips need CUDA hardware this machine
+**377 passed, 37 skipped** on CPU (`pytest -q`, ~2 min) and **484 passed on 2x Tesla T4**. All 37 skips need CUDA hardware this machine
 does not have, and each states its reason. Also verified from a **cold install**: a venv that had
 never seen this project runs the same suite to the same result.
 

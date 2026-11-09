@@ -57,6 +57,37 @@ environment block, so a cross-hardware comparison is visible as such rather than
 misleading. Re-record one deliberately, with a commit message saying why — never to silence a
 warning you have not explained.
 
+## Measured: GPU
+
+**Kaggle `T4 x2`**, 2026-11-09 — 2x Tesla T4 (sm_75, 320 GB/s peak each), torch 2.11.0+cu130,
+triton 3.6.0, source `010ee80`. Produced by `bash scripts/gpu_verify.sh`.
+
+| Label | Strategy | Precision | GPUs | tokens/s | peak allocated |
+|---|---|---|---|---|---|
+| gpu-fp32 | single | fp32 | 1 | 29,648 | 1,862 MiB |
+| gpu-bf16 | single | bf16 | 1 | 23,438 | 1,660 MiB |
+| gpu-ddp-2 | ddp | fp32 | 2 | **52,493** | 1,906 MiB |
+| gpu-fsdp-2 | fsdp | fp32 | 2 | 51,925 | 1,834 MiB |
+
+**1 to 2 GPUs is 1.77x.** FSDP costs 1.1% throughput and saves 72 MiB against DDP — the right
+direction, but the tiny preset is far too small for sharding to pay. **bf16 is slower than fp32**
+on this hardware (see the note below). Tensor parallelism is missing because it failed on this run
+(ISSUES #19), now fixed and awaiting a re-measurement.
+
+Triton RMSNorm against the PyTorch reference, float32 — the full table is in
+[PROGRESS.md](PROGRESS.md#measured-results):
+
+| rows x cols | direction | speedup | GB/s |
+|---|---|---|---|
+| 4096 x 768 | fwd | **3.66x** | 228 |
+| 65536 x 768 | fwd | **3.42x** | 236 |
+| 4096 x 1024 | fwd+bwd | **2.74x** | 42 |
+| 4096 x 192 | fwd+bwd | 1.07x | 13 |
+
+~235 GB/s is about **73% of the T4's theoretical peak**, the right target for a memory-bound op.
+The narrow 192-column case barely improves: launch overhead dominates and `dw` stays in PyTorch by
+design (D31).
+
 ## Measured: CPU
 
 tiny preset, Apple M4 Pro **CPU**, commit `7b8313e`, 3 warmup steps discarded, 3 repeats of 10
@@ -128,17 +159,23 @@ wrapping it for Colab:
 | Profiler traces | not yet wired; `torch.profiler` is a dependency and the harness is the place for it | any GPU |
 
 Note that **Colab cannot cover the two-GPU rows** — it provides one GPU per runtime. Those need a
-2-GPU machine (Kaggle's free `T4 x2`, or a rented instance), where `gpu_verify.sh` runs its
-multi-GPU section automatically. And **a T4 has no bf16 at all** (sm_75), so the FP32-vs-BF16 row
-needs an L4 or A100.
+2-GPU machine (Kaggle's free `T4 x2`, which is what produced the table above, or a rented
+instance), where `gpu_verify.sh` runs its multi-GPU section automatically.
+
+**On bf16 and the T4:** a T4 is sm_75 and has no *native* bf16, but torch counts emulated bf16, so
+`torch.cuda.is_bf16_supported()` is True and `precision: bf16` is permitted. It runs, and it is
+**slower than fp32** — 23,438 vs 29,648 tokens/s measured — while saving memory. The FP32-vs-BF16
+*speedup* therefore still needs Ampere or newer. Earlier versions of these docs said a T4 would
+error on bf16; that was wrong (ISSUES #21).
 
 Two expectations recorded **in advance**, so that measuring them is not mistaken for finding a bug:
 
 - **TP should lose to DDP on PCIe.** Two all-reduces per block per direction means communication
   dominates without NVLink-class bandwidth. This is why Megatron confines tensor parallelism to
   within a node and composes it with data parallelism across nodes.
-- **The Triton kernel's first run will probably surface bugs.** It has never executed (ISSUES #16).
-  The test suite is arranged so those land as test failures rather than as silently wrong training.
+- **The Triton kernel's first run will probably surface bugs.** — *Resolved 2026-11-09: it did
+  not.* The kernel passed all 68 tests on its first execution. The run did surface three other
+  bugs (ISSUES #19, #20, #21), all in code and tests *around* the kernel rather than in it.
 
 ## Reproducing a figure from this document
 

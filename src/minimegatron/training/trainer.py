@@ -33,6 +33,7 @@ from minimegatron.distributed.setup import (
     resolve_strategy,
 )
 from minimegatron.distributed.tensor_parallel import (
+    assert_single_device,
     clip_grad_norm_tp,
     gather_tp_optimizer_state_dict,
     gather_tp_state_dict,
@@ -181,6 +182,10 @@ class Trainer:
             self.mesh = build_tp_mesh(self.device.type, self.dist.world_size, self.tp_size)
             self.tp_group = self.mesh["tp"].get_group()
             self.model = parallelize_model(self.raw_model, self.tp_group)
+            # Surgery builds new parameters; a factory call that forgot `device=` would leave
+            # them on the CPU while the rest of the model is on a GPU. Checked here so it fails
+            # at construction with a clear message rather than deep inside a matmul (ISSUES #19).
+            assert_single_device(self.raw_model)
 
         # AFTER wrapping, always: `fully_shard` replaces parameters with sharded DTensors in
         # place, so an optimizer built earlier would hold the pre-shard tensors and silently

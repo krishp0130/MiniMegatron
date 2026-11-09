@@ -171,3 +171,51 @@ def test_tp_size_smaller_than_the_world_is_rejected(nano_config):
 def test_tp_size_equal_to_the_world_is_accepted(nano_config):
     validate_tp(nano_config, tp_size=2, world_size=2)
     validate_tp(nano_config, tp_size=4, world_size=4)
+
+
+# --- parallel layers must inherit placement from what they replace (ISSUES #19) -----------------
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64, torch.bfloat16])
+def test_parallel_layers_inherit_dtype_from_the_layer_they_replace(dtype):
+    """Catches the missing factory kwargs on a CPU-only machine.
+
+    The real bug was `torch.empty(...)` with no `device=`, which put every parallel shard on the
+    CPU while the rest of the model sat on a GPU — invisible here, fatal on a GPU. `dtype` travels
+    through exactly the same factory arguments, so pinning it pins the device too.
+    """
+    import torch.nn as nn
+
+    from minimegatron.distributed.tensor_parallel import ColumnParallelLinear, RowParallelLinear
+
+    linear = nn.Linear(8, 12).to(dtype)
+    for built in (
+        ColumnParallelLinear.from_linear(linear),
+        RowParallelLinear.from_linear(linear),
+    ):
+        assert built.weight.dtype == dtype
+        assert built.weight.device == linear.weight.device
+        if built.bias is not None:
+            assert built.bias.dtype == dtype
+            assert built.bias.device == linear.bias.device
+
+
+def test_assert_single_device_accepts_a_uniform_model(nano_config):
+    from minimegatron.distributed.tensor_parallel import assert_single_device
+
+    assert assert_single_device(GPT(nano_config)) == torch.device("cpu")
+
+
+def test_assert_single_device_names_the_offenders(nano_config):
+    """The guard that turns a silent split into a clear failure at construction."""
+    import torch.nn as nn
+
+    from minimegatron.distributed.tensor_parallel import assert_single_device
+
+    model = GPT(nano_config)
+    # `meta` stands in for "a different device" without needing a second real one.
+    model.blocks[0].mlp.fc1.weight = nn.Parameter(
+        torch.empty_like(model.blocks[0].mlp.fc1.weight, device="meta")
+    )
+    with pytest.raises(RuntimeError, match="span multiple devices"):
+        assert_single_device(model)
