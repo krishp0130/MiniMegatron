@@ -1,13 +1,37 @@
 # MiniMegatron
 
-An educational, engineering-quality distributed transformer training framework inspired by
-[NVIDIA Megatron-LM](https://github.com/NVIDIA/Megatron-LM): a GPT-style decoder, a training
-engine, DDP and FSDP2 data parallelism, Megatron-style tensor parallelism, a custom Triton
-kernel, and a correctness/benchmarking
-harness.
+[![CI](https://github.com/krishp0130/MiniMegatron/actions/workflows/ci.yml/badge.svg)](https://github.com/krishp0130/MiniMegatron/actions/workflows/ci.yml)
+![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
+![PyTorch 2.14.1](https://img.shields.io/badge/pytorch-2.14.1-ee4c2c)
+![tests 468](https://img.shields.io/badge/tests-468%20passing-brightgreen)
+![GPU verified](https://img.shields.io/badge/GPU-verified%20on%202%C3%97%20T4-success)
 
-> **Guiding principle:** every optimization has a reference implementation, a correctness test,
-> and a reproducible benchmark. No performance claim appears here without a measured config.
+An educational, engineering-quality distributed transformer training framework inspired by
+[NVIDIA Megatron-LM](https://github.com/NVIDIA/Megatron-LM) — built to understand how large models
+are actually trained, not to wrap a library that already does it.
+
+A GPT-style decoder trained four ways — single device, **DDP**, **FSDP2**, and Megatron-style
+**tensor parallelism** — plus a hand-written **Triton** kernel, a reliability suite and a
+benchmark harness. The communication primitives are written out by hand with explicit
+`autograd.Function`s and collectives, so every byte of it is readable.
+
+**The organising rule:** every optimization has a reference implementation, a correctness test and
+a reproducible benchmark. Nothing claims a speedup it has not measured, and nothing claims to work
+until it has run.
+
+### What that bought
+
+| | |
+|---|---|
+| **All four strategies agree** | single, DDP, FSDP2 and TP produce *identical* losses on the tiny preset |
+| **Triton kernel** | **3.4–3.7×** faster forward than the PyTorch reference, ~73% of a T4's peak bandwidth |
+| **Scaling** | **1.77×** from 1 to 2 GPUs, measured |
+| **Tests** | 468 on CPU, 484 on GPU, across 6 suites |
+| **Mutation testing** | 60 deliberate bugs injected, 59 caught |
+| **Bugs this found** | 21 recorded in [ISSUES.md](docs/ISSUES.md), several that normal testing missed |
+
+New here? Start with [architecture.md](docs/architecture.md) for how it fits together, or
+[ISSUES.md](docs/ISSUES.md) if you would rather read what went wrong and why.
 
 ## Status
 
@@ -22,7 +46,7 @@ harness.
 | 6. Reliability engineering | Regression and distributed tests, failure injection, CI | **done** |
 | 7. Documentation | Architecture, experiments, results tables | **done** |
 
-**376 tests pass on CPU**; **484 passed on 2x Tesla T4**. **60 deliberate bugs injected across
+**468 tests pass on CPU**; **484 passed on 2x Tesla T4**. **60 deliberate bugs injected across
 the milestones; 59 caught.** The Triton kernel has run on real hardware and works — see
 [measured results](docs/PROGRESS.md#measured-results).
 
