@@ -30,8 +30,10 @@ until it has run.
 | **Mutation testing** | 60 deliberate bugs injected, 59 caught |
 | **Bugs this found** | 21 recorded in [ISSUES.md](docs/ISSUES.md), several that normal testing missed |
 
-New here? Start with [architecture.md](docs/architecture.md) for how it fits together, or
-[ISSUES.md](docs/ISSUES.md) if you would rather read what went wrong and why.
+New here? **[OVERVIEW.md](docs/OVERVIEW.md) describes the entire project in one file** — what was
+built, why each choice was made, and what was measured. Otherwise start with
+[architecture.md](docs/architecture.md) for how it fits together, or [ISSUES.md](docs/ISSUES.md)
+if you would rather read what went wrong and why.
 
 ## Status
 
@@ -54,6 +56,7 @@ the milestones; 59 caught.** The Triton kernel has run on real hardware and work
 
 | Read this | For |
 |---|---|
+| **[OVERVIEW.md](docs/OVERVIEW.md)** | **the whole project in one self-contained file — start here** |
 | [architecture.md](docs/architecture.md) | how it is put together, and *why the seams are where they are* |
 | [distributed_training.md](docs/distributed_training.md) | DDP, FSDP2 and TP side by side; how correctness is established |
 | [fsdp.md](docs/fsdp.md) | all-gather vs reduce-scatter, sharding units, mixed precision, checkpoints |
@@ -61,7 +64,7 @@ the milestones; 59 caught.** The Triton kernel has run on real hardware and work
 | [testing.md](docs/testing.md) | the six suites, mutation testing, and the test-design rules learned the hard way |
 | [benchmarks.md](docs/benchmarks.md) | the measurement method, measured results, and what is still pending |
 | [PROGRESS.md](docs/PROGRESS.md) | current state, per-milestone session log, measured results |
-| [ISSUES.md](docs/ISSUES.md) | every problem hit (#1–#16) and every design decision (D1–D32) |
+| [ISSUES.md](docs/ISSUES.md) | every problem hit (#1–#21) and every design decision (D1–D32) |
 | [SCOPE.md](docs/SCOPE.md) | the authoritative specification |
 | [milestones/](docs/milestones/) | the design doc written before each milestone was implemented |
 
@@ -270,7 +273,7 @@ src/minimegatron/
 tests/                unit / numerical / distributed / kernels / fault_injection / regression
 scripts/              check_env.py
 results/baselines/    versioned performance baselines (other results/ output is gitignored)
-docs/                 architecture, distributed_training, fsdp, tensor_parallel, testing,
+docs/                 OVERVIEW, architecture, distributed_training, fsdp, tensor_parallel, testing,
                       benchmarks, SCOPE, PROGRESS, ISSUES, milestones/
 .github/workflows/    CI: the CPU-safe suite, gloo tests included
 ```
