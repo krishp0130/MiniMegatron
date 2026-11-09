@@ -25,7 +25,7 @@ until it has run.
 |---|---|
 | **All four strategies agree** | single, DDP, FSDP2 and TP produce *identical* losses on the tiny preset |
 | **Triton kernel** | **3.4–3.7×** faster forward than the PyTorch reference, ~73% of a T4's peak bandwidth |
-| **Scaling** | **1.77×** from 1 to 2 GPUs, measured |
+| **Scaling** | **1.77×** from 1 to 2 GPUs (DDP). TP is **38% slower than DDP** on PCIe — exactly as predicted before measuring |
 | **Tests** | 468 on CPU, 484 on GPU, across 6 suites |
 | **Mutation testing** | 60 deliberate bugs injected, 59 caught |
 | **Bugs this found** | 21 recorded in [ISSUES.md](docs/ISSUES.md), several that normal testing missed |
@@ -318,13 +318,13 @@ fabricate test results."*
 | 3 | Single-GPU training works on CUDA | **met** — 20 steps on a Tesla T4, 29,648 tokens/s |
 | 4 | DDP trains correctly across two GPUs, gradients verified | **met** — gradients verified against a single-process reference on gloo; measured on 2x T4 at **1.77x** scaling |
 | 5 | FSDP2 trains correctly with valid checkpointing | **met** — correctness, DCP round trip, resume and consolidation on gloo; measured on 2x T4 |
-| 6 | TP=2 matches the single-device reference in forward and gradients | **met** on 2 gloo ranks — sharded gradients match the reference slice, replicated ones match in full. The **2-GPU** run awaits a re-run after ISSUES #19 |
+| 6 | TP=2 matches the single-device reference in forward and gradients | **met** — sharded gradients match the reference slice and replicated ones match in full on gloo; **measured on 2x T4** at 32,545 tokens/s |
 | 7 | A Triton kernel passes numerical and gradient tests | **met** — 68 passed on a Tesla T4, no kernel bugs found |
 | 8 | Automated validation catches deliberately introduced errors | **met** — 60 mutations injected, 59 caught |
 | 9 | Benchmark results reproducible from documented configs | **met** — `scripts/gpu_verify.sh` produced every GPU figure recorded |
 | 10 | Performance claims cite measured configurations | **met** — every number names its hardware, commit and method |
 | 11 | Documented well enough for another engineer to run it | **met** — verified by a cold install, and by this GPU run following the documented path |
 
-**Ten of eleven fully met.** Criterion 6's two-GPU measurement is the single outstanding item,
-pending a re-run after the fix for ISSUES #19. No number appears here that was not measured on the
-machine named beside it.
+**All eleven met.** The only measurement still missing anywhere in this project is the
+FP32-vs-BF16 *speedup*, which needs Ampere or newer — a T4 emulates bf16 and is slower with it.
+No number appears here that was not measured on the machine named beside it.

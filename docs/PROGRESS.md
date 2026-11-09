@@ -10,7 +10,10 @@ checklist items, add a session-log entry, and rewrite "Next up". Scope lives in
   passed** (ISSUES #16 closed), so nothing is left unverified for want of a GPU except one row.
 - **Verified on NVIDIA hardware 2026-11-09**: Kaggle `T4 x2` (2x Tesla T4, sm_75), torch
   2.11.0+cu130, triton 3.6.0, source at `010ee80`. Measured results below.
-- **That run found three real bugs** the CPU-only suite could not: TP layers built on the CPU
+- **Re-verified 2026-11-09 at `ded2046`**: tensor parallelism now runs on 2 GPUs (32,545
+  tokens/s), and the three test files that failed on the first GPU run pass — **104 passed, 7
+  skipped, 0 failed**.
+- **The first run found three real bugs** the CPU-only suite could not: TP layers built on the CPU
   (#19), three tests encoding "no GPU here" as an invariant (#20), and a documentation error about
   bf16 on a T4 (#21). All fixed.
 - **Last updated:** 2026-11-09
@@ -27,7 +30,9 @@ Only two things remain, and neither is large:
 | Pending | Needs |
 |---|---|
 | **FP32 vs BF16 speedup** (M3) | **Ampere or newer.** A T4 is sm_75: bf16 runs but is *slower* than fp32 (measured), because it is emulated. An L4/A100 session would take minutes. |
-| **Tensor parallelism on 2 GPUs** | A re-run of `scripts/gpu_verify.sh` now that #19 is fixed. The TP section was the only one that failed; DDP and FSDP are measured. |
+
+That is the only outstanding measurement. Tensor parallelism was re-run on 2x T4 after the
+ISSUES #19 fix and is now recorded below.
 
 Deferred by choice, in the order worth doing them:
 1. Vocab-parallel embedding and cross-entropy — the largest remaining TP memory win.
@@ -159,8 +164,9 @@ launch overhead dominates, and `dw` stays in PyTorch by design (D31). The wideni
 | gpu-bf16 | single | bf16 | 1 | 23,438 | 1,660 MiB |
 | gpu-ddp-2 | ddp | fp32 | 2 | **52,493** | 1,906 MiB |
 | gpu-fsdp-2 | fsdp | fp32 | 2 | 51,925 | 1,834 MiB |
+| gpu-tp-2 | tp | fp32 | 2 | 32,545 | 1,841 MiB |
 
-Three things worth reading off this table:
+Four things worth reading off this table:
 
 - **1 to 2 GPUs: 1.77x** (29,648 to 52,493 tokens/s). Real scaling, on real hardware — the claim
   Milestone 2 could only make structurally before.
@@ -171,8 +177,16 @@ Three things worth reading off this table:
   emulates bf16 — see ISSUES #21, which corrects an earlier claim in these docs that bf16 would
   error on a T4. It does not; it runs, without the speedup.
 
-Tensor parallelism is **absent from this table** because it failed on the first GPU run (ISSUES
-#19 — the parallel layers were built on the CPU). Fixed, but not yet re-measured.
+- **Tensor parallelism is 38% slower than DDP** (32,545 vs 52,493) and only 1.10x faster than a
+  single GPU. This is the result predicted *in advance*, in M4's design doc and in
+  `benchmarks.md`, before any GPU existed to measure it: TP all-reduces twice per block per
+  direction, so its communication scales with depth rather than being one operation per step, and
+  two T4s on a PCIe bus have nowhere near the bandwidth to hide it. It is why Megatron confines
+  tensor parallelism to within a node and composes it with data parallelism across nodes. A
+  prediction written down before the measurement, and borne out.
+
+Measured 2026-11-09 after the ISSUES #19 fix, at commit `ded2046`; the first attempt failed
+because the parallel layers were built on the CPU.
 
 ### CPU throughput (measured, Milestone 6)
 ### CPU throughput (measured, Milestone 6)

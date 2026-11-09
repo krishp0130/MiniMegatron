@@ -68,11 +68,13 @@ triton 3.6.0, source `010ee80`. Produced by `bash scripts/gpu_verify.sh`.
 | gpu-bf16 | single | bf16 | 1 | 23,438 | 1,660 MiB |
 | gpu-ddp-2 | ddp | fp32 | 2 | **52,493** | 1,906 MiB |
 | gpu-fsdp-2 | fsdp | fp32 | 2 | 51,925 | 1,834 MiB |
+| gpu-tp-2 | tp | fp32 | 2 | 32,545 | 1,841 MiB |
 
 **1 to 2 GPUs is 1.77x.** FSDP costs 1.1% throughput and saves 72 MiB against DDP — the right
 direction, but the tiny preset is far too small for sharding to pay. **bf16 is slower than fp32**
-on this hardware (see the note below). Tensor parallelism is missing because it failed on this run
-(ISSUES #19), now fixed and awaiting a re-measurement.
+on this hardware (see the note below). **Tensor parallelism is 38% slower than DDP** and barely faster than one GPU — the result this
+document predicted before any GPU was available, because TP all-reduces twice per block per
+direction and two T4s on PCIe cannot hide that.
 
 Triton RMSNorm against the PyTorch reference, float32 — the full table is in
 [PROGRESS.md](PROGRESS.md#measured-results):
@@ -170,9 +172,10 @@ error on bf16; that was wrong (ISSUES #21).
 
 Two expectations recorded **in advance**, so that measuring them is not mistaken for finding a bug:
 
-- **TP should lose to DDP on PCIe.** Two all-reduces per block per direction means communication
-  dominates without NVLink-class bandwidth. This is why Megatron confines tensor parallelism to
-  within a node and composes it with data parallelism across nodes.
+- **TP should lose to DDP on PCIe.** — *Confirmed 2026-11-09: 32,545 vs 52,493 tokens/s, 38%
+  slower.* Two all-reduces per block per direction means communication dominates without
+  NVLink-class bandwidth. This is why Megatron confines tensor parallelism to within a node and
+  composes it with data parallelism across nodes.
 - **The Triton kernel's first run will probably surface bugs.** — *Resolved 2026-11-09: it did
   not.* The kernel passed all 68 tests on its first execution. The run did surface three other
   bugs (ISSUES #19, #20, #21), all in code and tests *around* the kernel rather than in it.
