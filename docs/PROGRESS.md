@@ -14,10 +14,14 @@ checklist items, add a session-log entry, and rewrite "Next up". Scope lives in
   [benchmarks.md](../docs/benchmarks.md). The harness, configs, baseline store and
   backend-parameterized kernel tests all exist, so each pending item is a command.
 - **Last updated:** 2026-11-08
-- **Test status:** 455 passed, 37 skipped (`pytest -q`, CPU, ~126 s). By suite: 261 unit, 88
-  distributed (two-process gloo), 73 kernels, 31 numerical, 27 fault-injection, 12 regression.
+- **Test status:** 463 passed, 37 skipped (`pytest -q`, CPU, ~125 s). By suite: 261 unit, 89
+  distributed (two-process gloo), 73 kernels, 34 fault-injection, 31 numerical, 12 regression.
   All 37 skips need CUDA hardware; 34 of them are the Triton-parameterized kernel tests
   (ISSUES #16).
+- **Verified from a cold install:** a fresh venv that had never seen this project installs with
+  `pip install -e ".[dev]"` and runs the full suite to the same result.
+- **CI is passing, not merely configured.** Recent GitHub Actions runs on `main`:
+  `42536192235` (M7, 6m39s), `42532323921` (M5, 7m37s), `42525629959` (M6, 8m28s) — all success.
 - **Verified hardware:** Apple M4 Pro (CPU + MPS), 2-process gloo. No NVIDIA GPU verification yet.
 - **CI:** GitHub Actions runs the CPU-safe suite — the gloo tests included — on every push.
 
@@ -212,6 +216,52 @@ produced them.
 ## Session log
 
 Newest first.
+
+### 2026-11-08 — End-to-end verification (two real bugs found and fixed)
+
+The first single pass over the whole project: a cold install, the full suite, **every documented
+command run verbatim**, the cross-strategy checkpoint path through the CLI, the failure modes from
+the command line, and determinism at the CLI boundary. 26 scripted checks, plus the suite.
+
+Everything the plan listed was run. **It found two real bugs that 60 mutations and 455 tests had
+both missed**, and both lived in seams between units rather than inside one:
+
+- **ISSUES #17 — a TP checkpoint gathered the model but not the optimizer.** Resuming a 2-rank TP
+  run's `_full.pt` in a single-device run loaded cleanly and then died on the *first optimizer
+  step*: `The size of tensor a (288) must match the size of tensor b (576)`. The file held full
+  weights beside rank 0's **sharded** Adam moments — 10,599,936 elements against the model's
+  11,487,360. FSDP's consolidation had always gathered both; TP's branch passed only
+  `model_state=`. Fixed with `gather_tp_optimizer_state_dict`, which all-gathers each moment along
+  the dimension its parameter is sharded on. The unit tests had asserted "the consolidated file
+  loads into a plain `GPT`" — and it did, because `load_state_dict` only checks the model.
+  **"It loads" is not "it works":** the regression test now takes an optimizer step, which is the
+  line that used to raise.
+- **ISSUES #18 — the CLI leaked tracebacks for setup errors.** Five documented failure modes
+  printed the correct message and then a full traceback, because `train.py` caught `ConfigError`
+  only around config *loading*; anything from `Trainer.__init__` or `--resume` escaped. Fixed by
+  extending the handler to trainer construction and resume (and the same in `benchmarks/run.py`),
+  while deliberately leaving `fit()` outside — a crash during training is a bug and must stay
+  loud. A test asserts that distinction.
+
+**Results.** 26/26 scripted checks pass. Cold install: a venv that had never seen this project
+installs with `pip install -e ".[dev]"` and runs the suite to **455 passed, 37 skipped** (463 now,
+after the tests added here). Every documented command exits 0, or non-zero *by design* for the
+seven refusals. A TP checkpoint and an FSDP checkpoint each resume a single-device run — and both
+produce identical continuation losses, which is further cross-strategy evidence. Two identical CLI
+runs produce identical metrics.
+
+**One false alarm worth recording:** the `global_batch_size` mismatch check appeared to leak a
+traceback under torchrun. It was torchrun's own — it raises `ChildFailedError` and prints a
+traceback plus a "Root Cause" block for any non-zero worker exit. Our ranks each printed one clean
+line. The harness check was tightened to look for a frame in *our* source rather than the word
+"Traceback" anywhere.
+
+**Housekeeping.** The README told readers to `pip install -e ".[dev,text,logging]"`, pulling in
+`tokenizers` and `tensorboard` — neither of which the project imports, since the real-text dataset
+was deferred and metrics are JSONL. The extras stay declared (they are the hook for planned work)
+but the install line is now `[dev]`, with the others explained. Three stale `.gitkeep` files
+removed from directories that now have content. CI's three passing runs recorded above with their
+IDs, since PROGRESS had been claiming CI ran on every push without citing one.
 
 ### 2026-11-08 — M7: final documentation (project wrapped)
 

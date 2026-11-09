@@ -12,6 +12,7 @@ See `docs/tensor_parallel.md` for the derivation.
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -407,6 +408,52 @@ def gather_state_dict(shards: list[dict[str, torch.Tensor]]) -> dict[str, torch.
         dim = tp_shard_dim(key)
         out[key] = shards[0][key] if dim is None else torch.cat([s[key] for s in shards], dim=dim)
     return out
+
+
+def gather_tp_optimizer_state_dict(
+    model: nn.Module, optimizer: torch.optim.Optimizer, group=None
+) -> dict[str, Any]:
+    """Gather a TP-sharded optimizer state into its full, single-device shape.
+
+    Adam's `exp_avg` and `exp_avg_sq` have the same shape as the parameter they track, so under
+    tensor parallelism they are sharded exactly as the parameters are -- and a consolidated
+    checkpoint that gathered only the *model* would be internally inconsistent: full weights beside
+    half-width moments. That file loads without complaint and then dies on the first optimizer
+    step with a shape error naming nothing actionable (ISSUES #17).
+
+    `torch` keys optimizer state by position in the flattened `param_groups` order, so the mapping
+    back to parameter names -- and therefore to shard dimensions -- is reconstructed from the
+    optimizer's own param groups rather than guessed.
+    """
+    size = group_size(group)
+    state_dict = optimizer.state_dict()
+    if size == 1:
+        return state_dict
+
+    name_of = {id(param): name for name, param in model.named_parameters()}
+    flat = [param for pg in optimizer.param_groups for param in pg["params"]]
+
+    gathered: dict[Any, Any] = {}
+    for index, param in enumerate(flat):
+        # Every rank holds the identical parameter structure (surgery is deterministic), so this
+        # loop issues the same sequence of collectives on every rank. That matters: a rank-
+        # dependent number of all-gathers would deadlock, which is the ISSUES #13 lesson.
+        entry = state_dict["state"].get(index)
+        if entry is None:
+            continue  # no state yet: true on every rank before the first optimizer step
+        dim = tp_shard_dim(name_of.get(id(param), ""))
+        rebuilt = {}
+        for key, value in entry.items():
+            if dim is not None and torch.is_tensor(value) and value.dim() > dim:
+                shards: list[Any] = [None] * size
+                dist.all_gather_object(shards, value.detach().cpu(), group=group)
+                rebuilt[key] = torch.cat(shards, dim=dim)
+            else:
+                # Replicated moments, and scalars like Adam's step counter, pass through.
+                rebuilt[key] = value
+        gathered[index] = rebuilt
+
+    return {"state": gathered, "param_groups": state_dict["param_groups"]}
 
 
 def gather_tp_state_dict(model: nn.Module, group=None) -> dict[str, torch.Tensor]:

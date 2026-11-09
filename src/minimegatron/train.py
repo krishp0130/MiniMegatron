@@ -86,21 +86,32 @@ def main(argv: list[str] | None = None) -> int:
     # a collective leaves them blocked until the timeout, turning one failure into a hung job.
     dist_info = init_distributed(cfg.distributed)
     try:
-        trainer = Trainer(cfg, dist_info=dist_info, out_dir=args.out_dir, echo=dist_info.is_main)
-        if dist_info.is_main:
-            world = (
-                f" | ranks: {dist_info.world_size}" if dist_info.is_distributed else ""
+        # Setup errors are *diagnostics*, not crashes, so they print a message and exit 2 rather
+        # than a traceback. Only the two expected kinds are caught, and `fit()` is deliberately
+        # outside: a failure during training really is a bug and should be loud (ISSUES #18).
+        try:
+            trainer = Trainer(
+                cfg, dist_info=dist_info, out_dir=args.out_dir, echo=dist_info.is_main
             )
-            print(
-                f"model: {trainer.raw_model.num_params():,} parameters "
-                f"({trainer.raw_model.num_params(include_embeddings=False):,} non-embedding) | "
-                f"device: {trainer.device} | steps: {cfg.train.max_steps}{world}",
-                flush=True,
-            )
-        if args.resume:
-            meta = trainer.resume(args.resume)
             if dist_info.is_main:
-                print(f"resumed from {args.resume} at step {meta['step']}", flush=True)
+                world = f" | ranks: {dist_info.world_size}" if dist_info.is_distributed else ""
+                print(
+                    f"model: {trainer.raw_model.num_params():,} parameters "
+                    f"({trainer.raw_model.num_params(include_embeddings=False):,} "
+                    f"non-embedding) | device: {trainer.device} | "
+                    f"steps: {cfg.train.max_steps}{world}",
+                    flush=True,
+                )
+            if args.resume:
+                meta = trainer.resume(args.resume)
+                if dist_info.is_main:
+                    print(f"resumed from {args.resume} at step {meta['step']}", flush=True)
+        except ConfigError as e:
+            print(f"configuration error: {e}", file=sys.stderr)
+            return 2
+        except FileNotFoundError as e:
+            print(f"file not found: {e}", file=sys.stderr)
+            return 2
 
         trainer.fit()
     finally:

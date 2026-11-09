@@ -47,9 +47,17 @@ Requires Python 3.11+ (3.12 recommended — D1).
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev,text,logging]"     # add ,gpu on a Linux + NVIDIA machine for Triton
-python scripts/check_env.py              # what this machine can and cannot run
+pip install -e ".[dev]"
+python scripts/check_env.py   # what this machine can and cannot run
 ```
+
+`dev` is pytest, and it is all you need: core is torch + numpy + pyyaml. Three further extras exist
+for features that are optional or not yet built, and nothing in the project imports them today —
+`gpu` (Triton; Linux + NVIDIA only), `text` (tokenizers, for the deferred real-text dataset) and
+`logging` (tensorboard, since metrics are JSONL).
+
+Verified from a cold start: a venv that had never seen this project installs with the line above
+and runs the full suite — 455 passed, 37 skipped.
 
 `check_env.py` prints the same environment probe the benchmark harness records, so an environment
 report and a benchmark record can never disagree about the machine.

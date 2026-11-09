@@ -34,6 +34,7 @@ from minimegatron.distributed.setup import (
 )
 from minimegatron.distributed.tensor_parallel import (
     clip_grad_norm_tp,
+    gather_tp_optimizer_state_dict,
     gather_tp_state_dict,
     parallelize_model,
     shard_state_dict,
@@ -499,7 +500,13 @@ class Trainer:
                 config=self.cfg,
                 device=self.device,
             )
-            full = gather_tp_state_dict(self.raw_model, self.tp_group)
+            # BOTH must be gathered. The optimizer's moments are shaped like the parameters they
+            # track, so gathering only the model would write full weights beside half-width
+            # moments -- a file that loads cleanly and then dies on the first step (ISSUES #17).
+            full_model = gather_tp_state_dict(self.raw_model, self.tp_group)
+            full_optimizer = gather_tp_optimizer_state_dict(
+                self.raw_model, self.optimizer, self.tp_group
+            )
             if self.dist.is_main:
                 save_checkpoint(
                     self.consolidated_path(),
@@ -510,7 +517,8 @@ class Trainer:
                     tokens_seen=self.tokens_seen,
                     config=self.cfg,
                     device=self.device,
-                    model_state=full,
+                    model_state=full_model,
+                    optimizer_state=full_optimizer,
                 )
         elif self.dist.is_main:
             save_checkpoint(

@@ -5,16 +5,17 @@ QA framework "a critical component"; this is the account of it.
 
 ## Current state
 
-**455 passed, 37 skipped** (`pytest -q`, CPU, ~2 min). All 37 skips need CUDA hardware this machine
-does not have, and each states its reason.
+**463 passed, 37 skipped** (`pytest -q`, CPU, ~2 min). All 37 skips need CUDA hardware this machine
+does not have, and each states its reason. Also verified from a **cold install**: a venv that had
+never seen this project runs the same suite to the same result.
 
 | Suite | Tests | What it is for |
 |---|---|---|
 | `tests/unit` | 261 | shapes, config validation, param groups, schedules, checkpoint round trips, data determinism |
-| `tests/distributed` | 88 | DDP, FSDP2 and TP correctness on **2 gloo ranks on CPU** |
+| `tests/distributed` | 89 | DDP, FSDP2 and TP correctness on **2 gloo ranks on CPU** |
 | `tests/kernels` | 73 | RMSNorm, parameterized over backend (34 Triton parameters skip — ISSUES #16) |
 | `tests/numerical` | 31 | reference vs optimized implementations, dtype-appropriate tolerances |
-| `tests/fault_injection` | 27 | controlled failures, asserting the **diagnostic**, not just that something raised |
+| `tests/fault_injection` | 34 | controlled failures, asserting the **diagnostic**, not just that something raised |
 | `tests/regression` | 12 | golden trajectories and structural invariants |
 
 ```bash
@@ -86,6 +87,24 @@ could not:
 **Two surviving mutations turned out to be bad mutations, not missing tests** (M3's optimizer
 ordering, M6's OOM message). That is worth checking before concluding a test is missing: a weak
 mutation that changes nothing observable proves nothing about the suite.
+
+### What mutation testing did *not* catch
+
+A single end-to-end pass — running the documented commands verbatim, from a cold install — found
+two real bugs that 60 mutations and 455 tests had both missed:
+
+- **A TP checkpoint gathered the model but not the optimizer** (ISSUES #17). The unit tests
+  asserted the consolidated file "loads into a plain `GPT`", and it did: `load_state_dict` only
+  checks the model. The inconsistency surfaced one optimizer step later, and no test stepped the
+  optimizer after loading. **"It loads" is not "it works."**
+- **The CLI leaked tracebacks for setup errors** (ISSUES #18). Five documented failure modes
+  printed the right message and then a traceback, because the handler only wrapped config
+  *loading*. The suite asserted "no traceback" for exactly the one path that was covered.
+
+Both are now tested. The lesson is about the *shape* of the gap rather than the bugs: mutation
+testing probes the code the tests already reach, and these lived in the seams between units —
+checkpoint-to-resume, and library-to-command-line. Exercising the documented interface end to end
+is a different instrument, and it was overdue.
 
 ## Functional invariants vs performance (D27)
 

@@ -282,3 +282,44 @@ def test_resuming_a_tp_run_from_its_per_rank_checkpoint(tmp_path):
     for rank in (0, 1):
         assert results[rank]["step"] == 3
         assert results[rank]["resumed"] == pytest.approx(results[rank]["straight"], rel=1e-6)
+
+
+def test_the_gathered_checkpoint_can_actually_resume_a_single_device_run(tmp_path):
+    """Regression for ISSUES #17: the consolidated file must be *internally consistent*.
+
+    Gathering the model but not the optimizer produced full weights beside half-width Adam
+    moments. That file loaded without complaint and then died on the first optimizer step with
+    `The size of tensor a (288) must match the size of tensor b (576)` -- a shape error naming
+    nothing actionable, one step into a resumed run.
+
+    So this does not stop at loading: it takes an optimizer step, which is where the inconsistency
+    actually surfaced.
+    """
+    import torch as _torch
+
+    from minimegatron.training.config import TrainConfig
+    from minimegatron.training.optimizer import build_optimizer
+
+    out_dir = tmp_path / "run"
+    run_distributed(_tp_train_and_save, 2, args=(str(out_dir),))
+
+    plain = GPT(ModelConfig(dropout=0.0, **NANO_MODEL))
+    optimizer = build_optimizer(plain, TrainConfig(lr=1e-3))
+    meta = load_checkpoint(
+        out_dir / "ckpt_000003_full.pt", model=plain, optimizer=optimizer
+    )
+    assert meta["step"] == 3
+
+    # Every restored moment must match its parameter's full shape, not a shard of it.
+    flat = [p for group in optimizer.param_groups for p in group["params"]]
+    for index, param in enumerate(flat):
+        entry = optimizer.state_dict()["state"].get(index)
+        if entry is None:
+            continue
+        assert entry["exp_avg"].shape == param.shape, f"param {index} has a sharded moment"
+
+    idx = _torch.randint(0, NANO_MODEL["vocab_size"], (2, 8))
+    _, loss = plain(idx, idx)
+    loss.backward()
+    optimizer.step()  # this is the line that used to raise
+    assert _torch.isfinite(loss)

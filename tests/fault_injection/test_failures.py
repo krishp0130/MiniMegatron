@@ -336,3 +336,85 @@ def test_the_distributed_harness_reports_a_failing_rank(tmp_path):
 
 def _always_fails(rank, world_size):
     raise RuntimeError("deliberate failure for the harness test")
+
+
+# --- the CLI's own error handling ---------------------------------------------------------------
+#
+# Regression for ISSUES #18: `train.py` used to catch ConfigError only around config *loading*, so
+# anything raised later -- in Trainer.__init__ or by --resume -- escaped as a bare traceback. The
+# message was right; the presentation was not, and SCOPE.md section 10 asks for meaningful errors.
+
+
+def write_config(path, **sections) -> None:
+    lines = [
+        "model: {vocab_size: 128, seq_len: 16, n_layers: 2, n_heads: 4, d_model: 32, d_ff: 64}",
+        "data: {dataset: random, n_items: 64, seed: 0}",
+    ]
+    for name, body in sections.items():
+        lines.append(f"{name}: {{{body}}}")
+    path.write_text("\n".join(lines) + "\n")
+
+
+@pytest.mark.parametrize(
+    "sections, extra, fragment",
+    [
+        # Raised by resolve_strategy, inside Trainer.__init__.
+        ({"distributed": "strategy: ddp"}, [], "needs more than one rank"),
+        ({"distributed": "strategy: fsdp"}, [], "needs more than one rank"),
+        ({"distributed": "strategy: tp"}, [], "needs more than one rank"),
+        # Raised by TrainConfig.validate_global_batch.
+        (
+            {"train": "max_steps: 1, micro_batch_size: 4, grad_accum_steps: 1, "
+                      "global_batch_size: 99, device: cpu"},
+            [],
+            "global_batch_size 99",
+        ),
+        # Raised by RMSNorm's constructor, via make_norm.
+        ({}, ["--set", "model.norm_type=rmsnorm", "--set", "model.norm_backend=triton"],
+         "Triton is not installed"),
+    ],
+)
+def test_setup_errors_exit_cleanly_rather_than_raising(tmp_path, capsys, sections, extra, fragment):
+    config = tmp_path / "c.yaml"
+    write_config(config, **sections)
+
+    assert train_main(["--config", str(config), "--out-dir", str(tmp_path / "run")] + extra) == 2
+
+    error = capsys.readouterr().err
+    assert "configuration error:" in error
+    assert fragment in error
+
+
+def test_missing_resume_target_exits_cleanly(tmp_path, capsys):
+    config = tmp_path / "c.yaml"
+    write_config(config, train="max_steps: 1, device: cpu")
+
+    code = train_main(
+        [
+            "--config", str(config),
+            "--out-dir", str(tmp_path / "run"),
+            "--resume", str(tmp_path / "ghost.pt"),
+        ]
+    )
+    assert code == 2
+    error = capsys.readouterr().err
+    assert "file not found:" in error and "checkpoint not found" in error
+
+
+def test_a_failure_during_training_is_still_loud(tmp_path, monkeypatch):
+    """The narrowness matters: only *setup* errors are turned into clean exits.
+
+    A crash inside the training loop is a bug, and must still propagate as an exception rather
+    than be flattened into a tidy exit code that a caller could mistake for a clean refusal.
+    """
+    from minimegatron.training.trainer import Trainer
+
+    config = tmp_path / "c.yaml"
+    write_config(config, train="max_steps: 1, device: cpu")
+
+    def explode(self):
+        raise RuntimeError("something genuinely broke mid-training")
+
+    monkeypatch.setattr(Trainer, "fit", explode)
+    with pytest.raises(RuntimeError, match="something genuinely broke"):
+        train_main(["--config", str(config), "--out-dir", str(tmp_path / "run")])

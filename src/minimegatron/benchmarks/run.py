@@ -66,8 +66,12 @@ def main(argv: list[str] | None = None) -> int:
 
     dist_info = init_distributed(cfg.distributed)
     try:
-        # A fresh trainer: benchmarking steps the real training loop, so it moves weights.
-        trainer = Trainer(cfg, dist_info=dist_info, out_dir=cfg.train.out_dir, echo=False)
+        try:
+            # A fresh trainer: benchmarking steps the real training loop, so it moves weights.
+            trainer = Trainer(cfg, dist_info=dist_info, out_dir=cfg.train.out_dir, echo=False)
+        except ConfigError as e:
+            print(f"configuration error: {e}", file=sys.stderr)
+            return 2
         record = benchmark(trainer, bench)
     finally:
         destroy_distributed()

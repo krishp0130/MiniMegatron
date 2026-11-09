@@ -49,6 +49,48 @@ the fix rather than deleting them.
 
 ## Resolved issues
 
+### #18 — The CLI leaked tracebacks for setup errors
+- **Status:** resolved, 2026-11-08
+- **Symptom:** found by the end-to-end run. Five documented failure modes printed the *correct*
+  message and then a full Python traceback: a missing `--resume` target, `strategy: ddp|fsdp|tp` on
+  one rank, and `norm_backend: triton` without Triton.
+- **Cause:** `train.py` caught `ConfigError` only around config **loading**. Everything raised
+  later — in `Trainer.__init__` by `resolve_strategy`, `validate_tp`, `validate_global_batch`,
+  `validate_precision` and `RMSNorm`'s constructor, or `FileNotFoundError` from `--resume` — escaped
+  uncaught. The fault-injection suite asserted "no traceback" only for the config-loading path, so
+  nothing noticed.
+- **Fix:** trainer construction and `--resume` are now inside the same handler, catching
+  `ConfigError` and `FileNotFoundError` and exiting 2 with one clean line. `benchmarks/run.py` got
+  the same treatment. **`fit()` is deliberately left outside**: a crash during training is a bug
+  and must stay loud rather than be flattened into a tidy exit code. A test asserts that too.
+- **Note on torchrun:** a non-zero worker exit always makes torchrun print its own traceback and a
+  "Root Cause" block. That is its reporting, not a leak from this project — the check is for a
+  traceback frame in *our* source.
+
+### #17 — A TP checkpoint gathered the model but not the optimizer
+- **Status:** resolved, 2026-11-08
+- **Symptom:** found by the end-to-end run, which was the first thing to exercise the documented
+  cross-strategy resume **through the CLI**. Training 2-rank TP and then resuming the gathered
+  `_full.pt` in a single-device run loaded without complaint and died on the **first optimizer
+  step**:
+  `RuntimeError: The size of tensor a (288) must match the size of tensor b (576)`.
+- **Cause:** the TP branch of `Trainer.save` passed `model_state=` (gathered) but not
+  `optimizer_state=`, so `optimizer.state_dict()` was used — rank 0's **sharded** moments. The file
+  therefore held full weights beside half-width Adam state: `exp_avg` shapes of `(288, 192)` where
+  the parameter is `(576, 192)`, totalling 10,599,936 elements against the model's 11,487,360. FSDP's
+  consolidation path had always gathered both; TP's had not.
+- **Why no test caught it:** the unit tests asserted the consolidated file loads into a plain `GPT`
+  — which it did, because `load_state_dict` only checks the *model*. The inconsistency surfaced one
+  optimizer step later, and no test stepped the optimizer after loading.
+- **Fix:** `gather_tp_optimizer_state_dict` all-gathers each moment along the same dimension its
+  parameter is sharded on, reconstructing the index→name mapping from the optimizer's own param
+  groups (torch keys optimizer state by position in the flattened `param_groups` order). The
+  regression test now **takes an optimizer step** after loading, which is the line that used to
+  raise.
+- **Lesson:** "it loads" is not "it works". A checkpoint test must exercise the thing the
+  checkpoint is *for* — resuming — not merely the deserialization. And the two consolidation paths
+  (FSDP's and TP's) should have been one function; the duplication is what let them diverge.
+
 ### #15 — `eps` is not negligible at small activation scales
 - **Status:** resolved (test-design rule), 2026-11-08
 - **Symptom:** a kernel test asserted that a constant row normalizes to exactly 1.0 and measured
